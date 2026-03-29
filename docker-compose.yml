@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      # Persist audio cache across container restarts
+      - audio_cache:/app/audio_cache
+    restart: unless-stopped
+
+volumes:
+  audio_cache:
