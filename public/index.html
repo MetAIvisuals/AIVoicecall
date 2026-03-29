@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Call Translator — Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f4f0; color: #1a1a1a; min-height: 100vh; }
+    header { background: white; border-bottom: 1px solid #e5e5e5; padding: 0 2rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { font-size: 16px; font-weight: 500; }
+    .badge { background: #e1f5ee; color: #0f6e56; font-size: 12px; padding: 3px 10px; border-radius: 20px; font-weight: 500; }
+    .main { max-width: 900px; margin: 2rem auto; padding: 0 1.5rem; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 2rem; }
+    .stat { background: white; border: 1px solid #e5e5e5; border-radius: 10px; padding: 1rem 1.25rem; }
+    .stat-label { font-size: 12px; color: #888; margin-bottom: 4px; }
+    .stat-value { font-size: 24px; font-weight: 500; }
+    .sessions { background: white; border: 1px solid #e5e5e5; border-radius: 10px; overflow: hidden; }
+    .sessions-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e5e5; font-size: 14px; font-weight: 500; display: flex; justify-content: space-between; align-items: center; }
+    .session-card { padding: 1rem 1.25rem; border-bottom: 1px solid #f0f0f0; }
+    .session-card:last-child { border-bottom: none; }
+    .session-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .session-id { font-size: 12px; color: #888; font-family: monospace; }
+    .session-status { font-size: 12px; padding: 2px 8px; border-radius: 10px; }
+    .status-active { background: #e1f5ee; color: #0f6e56; }
+    .status-completed { background: #f0f0f0; color: #666; }
+    .lang-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; background: #f5f4f0; padding: 4px 10px; border-radius: 20px; margin-bottom: 10px; }
+    .transcript-list { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
+    .t-item { font-size: 13px; line-height: 1.5; }
+    .t-item .original { color: #888; }
+    .t-item .translated { color: #1a1a1a; font-weight: 500; }
+    .t-item .arrow { color: #bbb; margin: 0 4px; }
+    .empty { padding: 3rem; text-align: center; color: #888; font-size: 14px; }
+    .refresh-btn { font-size: 13px; color: #185fa5; cursor: pointer; background: none; border: none; padding: 4px 8px; border-radius: 6px; }
+    .refresh-btn:hover { background: #e6f1fb; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📞 Call Translator</h1>
+    <span class="badge" id="liveBadge">● Live</span>
+  </header>
+
+  <div class="main">
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">Active calls</div>
+        <div class="stat-value" id="activeCalls">0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Total today</div>
+        <div class="stat-value" id="totalCalls">0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Phrases translated</div>
+        <div class="stat-value" id="totalPhrases">0</div>
+      </div>
+    </div>
+
+    <div class="sessions">
+      <div class="sessions-header">
+        <span>Recent calls</span>
+        <button class="refresh-btn" onclick="loadSessions()">↻ Refresh</button>
+      </div>
+      <div id="sessionList"><div class="empty">No calls yet. Dial your Twilio number to start.</div></div>
+    </div>
+  </div>
+
+  <script>
+    async function loadSessions() {
+      try {
+        const res = await fetch('/api/sessions');
+        const sessions = await res.json();
+
+        const active = sessions.filter(s => s.status === 'active').length;
+        document.getElementById('activeCalls').textContent = active;
+        document.getElementById('totalCalls').textContent = sessions.length;
+        const phrases = sessions.reduce((n, s) => n + (s.transcript?.length || 0), 0);
+        document.getElementById('totalPhrases').textContent = phrases;
+
+        const list = document.getElementById('sessionList');
+        if (!sessions.length) {
+          list.innerHTML = '<div class="empty">No calls yet. Dial your Twilio number to start.</div>';
+          return;
+        }
+
+        list.innerHTML = sessions.slice().reverse().map(s => `
+          <div class="session-card">
+            <div class="session-top">
+              <span class="session-id">${s.callSid}</span>
+              <span class="session-status ${s.status === 'active' ? 'status-active' : 'status-completed'}">${s.status}</span>
+            </div>
+            <div class="lang-pill">
+              <span>${s.from}</span>
+              <span>→</span>
+              <span>${s.targetNumber}</span>
+              <span style="color:#bbb;">|</span>
+              <span>${(s.callerLang || 'en').toUpperCase()} → ${(s.targetLang || 'de').toUpperCase()}</span>
+            </div>
+            ${s.transcript && s.transcript.length ? `
+              <div class="transcript-list">
+                ${s.transcript.map(t => `
+                  <div class="t-item">
+                    <span class="original">"${t.original}"</span>
+                    <span class="arrow">→</span>
+                    <span class="translated">"${t.translated}"</span>
+                  </div>
+                `).join('')}
+              </div>
+            ` : '<div style="font-size:13px;color:#bbb;">No transcript yet</div>'}
+          </div>
+        `).join('');
+      } catch (e) {
+        console.error('Failed to load sessions:', e);
+      }
+    }
+
+    loadSessions();
+    setInterval(loadSessions, 3000); // auto-refresh every 3 seconds
+  </script>
+</body>
+</html>
