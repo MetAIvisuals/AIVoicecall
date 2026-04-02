@@ -6,7 +6,7 @@ import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { handleInboundCall, handleCallStatus } from './routes/call.js';
+import { handleInboundCall, handleCallAnswered, handleCallStatus } from './routes/call.js';
 import { handleMediaStream } from './routes/stream.js';
 import { sessionStore } from './services/sessionStore.js';
 
@@ -21,6 +21,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 
 app.post('/call/inbound', handleInboundCall);
+app.post('/call/answered', handleCallAnswered);
 app.post('/call/status', handleCallStatus);
 
 app.get('/api/sessions', (req, res) => {
