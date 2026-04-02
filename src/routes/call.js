@@ -3,6 +3,10 @@ import { sessionStore } from '../services/sessionStore.js';
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
+function getClient() {
+  return twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+}
+
 export function handleInboundCall(req, res) {
   const callSid = req.body.CallSid;
   const from = req.body.From;
@@ -24,7 +28,7 @@ export function handleInboundCall(req, res) {
   const serverUrl = (process.env.SERVER_URL || '').replace(/\/$/, '');
   const wsHost = serverUrl.replace(/^https?:\/\//, '');
 
-  console.log(`[CALL] SERVER_URL=${serverUrl}, wsHost=${wsHost}`);
+  console.log(`[CALL] Dialling ${targetNumber}, stream at wss://${wsHost}/media-stream`);
 
   const twiml = new VoiceResponse();
 
@@ -33,24 +37,46 @@ export function handleInboundCall(req, res) {
     'Connecting your call with live translation. Please wait.'
   );
 
-  // Dial the target — stream runs on this leg
+  // Dial target — when they answer, open the media stream on the inbound leg
   const dial = twiml.dial({
     callerId: process.env.TWILIO_PHONE_NUMBER,
     action: `${serverUrl}/call/status`,
     method: 'POST',
     timeout: 30,
+    record: 'do-not-record',
   });
-
-  // Stream audio from BOTH sides so we can translate
-  dial.stream({
-    url: `wss://${wsHost}/media-stream`,
-    track: 'both_tracks',
-    parameter: [{ name: 'callSid', value: callSid }],
-  });
-
-  dial.number(targetNumber);
+  dial.number({
+    statusCallback: `${serverUrl}/call/answered?callSid=${callSid}&wsHost=${wsHost}`,
+    statusCallbackEvent: 'answered',
+    statusCallbackMethod: 'POST',
+  }, targetNumber);
 
   res.type('text/xml').send(twiml.toString());
+}
+
+// Called when the target answers — we open the media stream on the parent call
+export async function handleCallAnswered(req, res) {
+  res.sendStatus(200);
+
+  const { callSid, wsHost } = req.query;
+  const parentCallSid = callSid;
+
+  console.log(`[CALL] Target answered, opening stream on ${parentCallSid}`);
+
+  try {
+    const streamTwiml = `<Response>
+      <Connect>
+        <Stream url="wss://${wsHost}/media-stream" track="inbound_track">
+          <Parameter name="callSid" value="${parentCallSid}"/>
+        </Stream>
+      </Connect>
+    </Response>`;
+
+    await getClient().calls(parentCallSid).update({ twiml: streamTwiml });
+    console.log(`[CALL] Stream injected into call ${parentCallSid}`);
+  } catch (err) {
+    console.error(`[CALL] Failed to inject stream: ${err.message}`);
+  }
 }
 
 export function handleCallStatus(req, res) {
