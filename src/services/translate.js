@@ -1,6 +1,10 @@
 import OpenAI from 'openai';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let _openai = null;
+function getClient() {
+  if (!_openai) _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return _openai;
+}
 
 const LANGUAGE_NAMES = {
   en: 'English', de: 'German', fr: 'French', es: 'Spanish',
@@ -19,7 +23,7 @@ export async function translateText(text, sourceLang, targetLang) {
   const fromName = LANGUAGE_NAMES[sourceLang] || sourceLang;
   const toName = LANGUAGE_NAMES[targetLang] || targetLang;
 
-  const response = await openai.chat.completions.create({
+  const response = await getClient().chat.completions.create({
     model: 'gpt-4o-mini',
     temperature: 0.2,
     messages: [

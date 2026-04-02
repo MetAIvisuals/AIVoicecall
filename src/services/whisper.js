@@ -4,7 +4,11 @@ import { writeFileSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let _openai = null;
+function getClient() {
+  if (!_openai) _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return _openai;
+}
 
 /**
  * Transcribes a mulaw audio buffer using OpenAI Whisper.
@@ -24,7 +28,7 @@ export async function transcribeAudio(mulawBuffer, languageHint = 'en') {
       { type: 'audio/wav' }
     );
 
-    const response = await openai.audio.transcriptions.create({
+    const response = await getClient().audio.transcriptions.create({
       model: 'whisper-1',
       file,
       language: languageHint,
