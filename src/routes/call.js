@@ -33,19 +33,21 @@ export function handleInboundCall(req, res) {
     'Connecting your call with live translation. Please wait.'
   );
 
-  const connect = twiml.connect();
-  const stream = connect.stream({
-    url: `wss://${wsHost}/media-stream`,
-    track: 'inbound_track',
-  });
-  stream.parameter({ name: 'callSid', value: callSid });
-
+  // Dial the target — stream runs on this leg
   const dial = twiml.dial({
     callerId: process.env.TWILIO_PHONE_NUMBER,
     action: `${serverUrl}/call/status`,
     method: 'POST',
     timeout: 30,
   });
+
+  // Stream audio from BOTH sides so we can translate
+  dial.stream({
+    url: `wss://${wsHost}/media-stream`,
+    track: 'both_tracks',
+    parameter: [{ name: 'callSid', value: callSid }],
+  });
+
   dial.number(targetNumber);
 
   res.type('text/xml').send(twiml.toString());
