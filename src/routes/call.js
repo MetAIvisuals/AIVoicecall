@@ -3,21 +3,13 @@ import { sessionStore } from '../services/sessionStore.js';
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-/**
- * Called when someone dials your Twilio number.
- * We greet them, then connect a Media Stream for real-time audio,
- * and simultaneously dial the target number.
- */
 export function handleInboundCall(req, res) {
   const callSid = req.body.CallSid;
   const from = req.body.From;
-  const targetNumber = req.body.To === process.env.TWILIO_PHONE_NUMBER
-    ? process.env.DEFAULT_TARGET_NUMBER   // demo: always bridge to this number
-    : req.body.To;
+  const targetNumber = process.env.DEFAULT_TARGET_NUMBER;
 
   console.log(`[CALL] Inbound from ${from}, CallSid: ${callSid}`);
 
-  // Create a session to track this call
   sessionStore.set(callSid, {
     callSid,
     from,
@@ -29,27 +21,28 @@ export function handleInboundCall(req, res) {
     transcript: [],
   });
 
-  const host = process.env.SERVER_URL; // e.g. https://yourapp.ngrok.io
+  const serverUrl = (process.env.SERVER_URL || '').replace(/\/$/, '');
+  const wsHost = serverUrl.replace(/^https?:\/\//, '');
+
+  console.log(`[CALL] SERVER_URL=${serverUrl}, wsHost=${wsHost}`);
+
   const twiml = new VoiceResponse();
 
-  // Brief greeting
   twiml.say(
     { voice: 'Polly.Joanna', language: 'en-US' },
     'Connecting your call with live translation. Please wait.'
   );
 
-  // Open a Media Stream so we can capture audio in real time
   const connect = twiml.connect();
   const stream = connect.stream({
-    url: `wss://${host.replace(/^https?:\/\//, '')}/media-stream`,
-    track: 'inbound_track',   // capture caller's audio
+    url: `wss://${wsHost}/media-stream`,
+    track: 'inbound_track',
   });
   stream.parameter({ name: 'callSid', value: callSid });
 
-  // Dial the German party — Twilio bridges the two legs
   const dial = twiml.dial({
     callerId: process.env.TWILIO_PHONE_NUMBER,
-    action: `${host}/call/status`,
+    action: `${serverUrl}/call/status`,
     method: 'POST',
     timeout: 30,
   });
@@ -58,9 +51,6 @@ export function handleInboundCall(req, res) {
   res.type('text/xml').send(twiml.toString());
 }
 
-/**
- * Called when the dialed leg completes.
- */
 export function handleCallStatus(req, res) {
   const { CallSid, DialCallStatus } = req.body;
   console.log(`[CALL] Status update for ${CallSid}: ${DialCallStatus}`);
@@ -71,7 +61,6 @@ export function handleCallStatus(req, res) {
     sessionStore.set(CallSid, session);
   }
 
-  // Hang up cleanly
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.hangup();
   res.type('text/xml').send(twiml.toString());
