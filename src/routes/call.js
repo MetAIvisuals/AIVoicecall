@@ -18,42 +18,30 @@ export function handleInboundCall(req, res) {
   console.log(`[CALL] Inbound from ${from}, CallSid: ${callSid}`);
 
   sessionStore.set(callSid, {
-    callSid,
-    from,
-    targetNumber,
-    conferenceName,
-    wsHost,
-    serverUrl,
-    status: 'active',
-    startedAt: new Date().toISOString(),
+    callSid, from, targetNumber, conferenceName, wsHost, serverUrl,
+    status: 'active', startedAt: new Date().toISOString(),
     callerLang: process.env.CALLER_LANG || 'en',
     targetLang: process.env.TARGET_LANG || 'de',
     transcript: [],
   });
 
-  // Dial target — joins same conference, fires callback when they answer
+  // Dial target into the same conference
   getClient().calls.create({
     to: targetNumber,
     from: process.env.TWILIO_PHONE_NUMBER,
     twiml: `<Response>
       <Say voice="Polly.Marlene" language="de-DE">Bitte warten, Anruf wird verbunden.</Say>
-      <Dial>
-        <Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true" waitUrl="">${conferenceName}</Conference>
-      </Dial>
+      <Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true" waitUrl="">${conferenceName}</Conference></Dial>
     </Response>`,
-    statusCallback: `${serverUrl}/call/target-answered?callSid=${callSid}`,
-    statusCallbackEvent: ['answered'],
-    statusCallbackMethod: 'POST',
   }).then(call => {
     console.log(`[CALL] Outbound leg: ${call.sid}`);
-  }).catch(err => {
-    console.error(`[CALL] Dial failed: ${err.message}`);
-  });
+    // Start media stream on conference once outbound call is created
+    setTimeout(() => startConferenceStream(conferenceName, callSid, wsHost, serverUrl), 8000);
+  }).catch(err => console.error(`[CALL] Dial failed: ${err.message}`));
 
-  // Put caller into conference — wait for target to join
+  // Put caller into conference
   const twiml = new VoiceResponse();
-  twiml.say({ voice: 'Polly.Joanna', language: 'en-US' },
-    'Connecting your call with live translation. Please wait.');
+  twiml.say({ voice: 'Polly.Joanna', language: 'en-US' }, 'Connecting your call with live translation. Please wait.');
   const dial = twiml.dial({ action: `${serverUrl}/call/status`, method: 'POST' });
   dial.conference(conferenceName, {
     beep: false,
@@ -65,31 +53,29 @@ export function handleInboundCall(req, res) {
   res.type('text/xml').send(twiml.toString());
 }
 
-// Fires when target answers — now open the media stream on the INBOUND call leg
-export async function handleCallAnswered(req, res) {
-  res.sendStatus(200);
-  const { callSid } = req.query;
-  const session = sessionStore.get(callSid);
-  if (!session) return;
-
-  const { wsHost } = session;
-  console.log(`[CALL] Target answered — injecting stream on ${callSid}`);
-
+async function startConferenceStream(conferenceName, callSid, wsHost, serverUrl) {
   try {
-    await getClient().calls(callSid).update({
-      twiml: `<Response>
-        <Connect>
-          <Stream url="wss://${wsHost}/media-stream" track="inbound_track">
-            <Parameter name="callSid" value="${callSid}"/>
-          </Stream>
-        </Connect>
-      </Response>`,
+    console.log(`[CALL] Looking up conference: ${conferenceName}`);
+    const conferences = await getClient().conferences.list({ friendlyName: conferenceName, status: 'in-progress', limit: 1 });
+    if (!conferences.length) {
+      console.log(`[CALL] Conference not found or not active yet, retrying...`);
+      setTimeout(() => startConferenceStream(conferenceName, callSid, wsHost, serverUrl), 3000);
+      return;
+    }
+    const conferenceSid = conferences[0].sid;
+    console.log(`[CALL] Starting stream on conference ${conferenceSid}`);
+    await getClient().conferences(conferenceSid).streams.create({
+      url: `wss://${wsHost}/media-stream`,
+      track: 'inbound_track',
+      parameter1: `callSid=${callSid}`,
     });
-    console.log(`[CALL] Stream injected on ${callSid}`);
+    console.log(`[CALL] Conference stream started`);
   } catch (err) {
-    console.error(`[CALL] Stream inject failed: ${err.message}`);
+    console.error(`[CALL] Conference stream failed: ${err.message}`);
   }
 }
+
+export function handleCallAnswered(req, res) { res.sendStatus(200); }
 
 export function handleCallStatus(req, res) {
   const { CallSid, DialCallStatus } = req.body;
