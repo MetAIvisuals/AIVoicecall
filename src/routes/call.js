@@ -11,6 +11,9 @@ export function handleInboundCall(req, res) {
   const callSid = req.body.CallSid;
   const from = req.body.From;
   const targetNumber = process.env.DEFAULT_TARGET_NUMBER;
+  const serverUrl = (process.env.SERVER_URL || '').replace(/\/$/, '');
+  const wsHost = serverUrl.replace(/^https?:\/\//, '');
+  const conferenceName = `conf_${callSid}`;
 
   console.log(`[CALL] Inbound from ${from}, CallSid: ${callSid}`);
 
@@ -18,6 +21,7 @@ export function handleInboundCall(req, res) {
     callSid,
     from,
     targetNumber,
+    conferenceName,
     status: 'active',
     startedAt: new Date().toISOString(),
     callerLang: process.env.CALLER_LANG || 'en',
@@ -25,58 +29,49 @@ export function handleInboundCall(req, res) {
     transcript: [],
   });
 
-  const serverUrl = (process.env.SERVER_URL || '').replace(/\/$/, '');
-  const wsHost = serverUrl.replace(/^https?:\/\//, '');
-
-  console.log(`[CALL] Dialling ${targetNumber}, stream at wss://${wsHost}/media-stream`);
-
-  const twiml = new VoiceResponse();
-
-  twiml.say(
-    { voice: 'Polly.Joanna', language: 'en-US' },
-    'Connecting your call with live translation. Please wait.'
-  );
-
-  // Dial target — when they answer, open the media stream on the inbound leg
-  const dial = twiml.dial({
-    callerId: process.env.TWILIO_PHONE_NUMBER,
-    action: `${serverUrl}/call/status`,
-    method: 'POST',
-    timeout: 30,
-    record: 'do-not-record',
+  // Dial the target number — when they answer they join the conference
+  getClient().calls.create({
+    to: targetNumber,
+    from: process.env.TWILIO_PHONE_NUMBER,
+    twiml: `<Response>
+      <Say voice="Polly.Marlene" language="de-DE">Bitte warten Sie, ein Anruf wird verbunden.</Say>
+      <Dial>
+        <Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true" waitUrl="">
+          ${conferenceName}
+        </Conference>
+      </Dial>
+    </Response>`,
+  }).then(call => {
+    console.log(`[CALL] Outbound leg created: ${call.sid}`);
+  }).catch(err => {
+    console.error(`[CALL] Failed to dial target: ${err.message}`);
   });
-  dial.number({
-    statusCallback: `${serverUrl}/call/answered?callSid=${callSid}&wsHost=${wsHost}`,
-    statusCallbackEvent: 'answered',
-    statusCallbackMethod: 'POST',
-  }, targetNumber);
+
+  // Put caller into the same conference with media stream
+  const twiml = new VoiceResponse();
+  twiml.say({ voice: 'Polly.Joanna', language: 'en-US' },
+    'Connecting your call with live translation. Please wait.');
+
+  const connect = twiml.connect();
+  const stream = connect.stream({
+    url: `wss://${wsHost}/media-stream`,
+    track: 'inbound_track',
+  });
+  stream.parameter({ name: 'callSid', value: callSid });
+
+  const dial = twiml.dial();
+  dial.conference({
+    beep: false,
+    startConferenceOnEnter: false,
+    endConferenceOnExit: true,
+    waitUrl: '',
+  }, conferenceName);
 
   res.type('text/xml').send(twiml.toString());
 }
 
-// Called when the target answers — we open the media stream on the parent call
-export async function handleCallAnswered(req, res) {
+export function handleCallAnswered(req, res) {
   res.sendStatus(200);
-
-  const { callSid, wsHost } = req.query;
-  const parentCallSid = callSid;
-
-  console.log(`[CALL] Target answered, opening stream on ${parentCallSid}`);
-
-  try {
-    const streamTwiml = `<Response>
-      <Connect>
-        <Stream url="wss://${wsHost}/media-stream" track="inbound_track">
-          <Parameter name="callSid" value="${parentCallSid}"/>
-        </Stream>
-      </Connect>
-    </Response>`;
-
-    await getClient().calls(parentCallSid).update({ twiml: streamTwiml });
-    console.log(`[CALL] Stream injected into call ${parentCallSid}`);
-  } catch (err) {
-    console.error(`[CALL] Failed to inject stream: ${err.message}`);
-  }
 }
 
 export function handleCallStatus(req, res) {
