@@ -1,4 +1,5 @@
 import twilio from 'twilio';
+import fetch from 'node-fetch';
 import { sessionStore } from '../services/sessionStore.js';
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
@@ -25,7 +26,7 @@ export function handleInboundCall(req, res) {
     transcript: [],
   });
 
-  // Dial target into the same conference
+  // Dial target into same conference
   getClient().calls.create({
     to: targetNumber,
     from: process.env.TWILIO_PHONE_NUMBER,
@@ -35,8 +36,7 @@ export function handleInboundCall(req, res) {
     </Response>`,
   }).then(call => {
     console.log(`[CALL] Outbound leg: ${call.sid}`);
-    // Start media stream on conference once outbound call is created
-    setTimeout(() => startConferenceStream(conferenceName, callSid, wsHost, serverUrl), 8000);
+    setTimeout(() => startConferenceStream(conferenceName, callSid, wsHost), 8000);
   }).catch(err => console.error(`[CALL] Dial failed: ${err.message}`));
 
   // Put caller into conference
@@ -53,25 +53,78 @@ export function handleInboundCall(req, res) {
   res.type('text/xml').send(twiml.toString());
 }
 
-async function startConferenceStream(conferenceName, callSid, wsHost, serverUrl) {
+async function startConferenceStream(conferenceName, callSid, wsHost) {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+
   try {
-    console.log(`[CALL] Looking up conference: ${conferenceName}`);
-    const conferences = await getClient().conferences.list({ friendlyName: conferenceName, status: 'in-progress', limit: 1 });
+    // Look up the conference SID
+    const conferences = await getClient().conferences.list({
+      friendlyName: conferenceName,
+      status: 'in-progress',
+      limit: 1,
+    });
+
     if (!conferences.length) {
-      console.log(`[CALL] Conference not found or not active yet, retrying...`);
-      setTimeout(() => startConferenceStream(conferenceName, callSid, wsHost, serverUrl), 3000);
+      console.log(`[CALL] Conference not active yet, retrying in 3s...`);
+      setTimeout(() => startConferenceStream(conferenceName, callSid, wsHost), 3000);
       return;
     }
+
     const conferenceSid = conferences[0].sid;
-    console.log(`[CALL] Starting stream on conference ${conferenceSid}`);
-    await getClient().conferences(conferenceSid).streams.create({
-      url: `wss://${wsHost}/media-stream`,
-      track: 'inbound_track',
-      parameter1: `callSid=${callSid}`,
+    console.log(`[CALL] Attaching stream to conference ${conferenceSid}`);
+
+    // Use raw REST API — SDK doesn't support conference streams yet
+    const url = `https://insights.twilio.com/v1/Voice/Streams`;
+    const body = new URLSearchParams({
+      ConferenceSid: conferenceSid,
+      StreamUrl: `wss://${wsHost}/media-stream`,
+      Track: 'inbound_track',
+      'Parameter1.Name': 'callSid',
+      'Parameter1.Value': callSid,
     });
-    console.log(`[CALL] Conference stream started`);
+
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64'),
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body,
+    });
+
+    const result = await resp.json();
+    if (resp.ok) {
+      console.log(`[CALL] Stream attached: ${result.sid}`);
+    } else {
+      console.error(`[CALL] Stream attach failed: ${JSON.stringify(result)}`);
+      // Fallback: inject stream on inbound call leg directly
+      await injectStreamOnCallLeg(callSid, wsHost);
+    }
   } catch (err) {
-    console.error(`[CALL] Conference stream failed: ${err.message}`);
+    console.error(`[CALL] startConferenceStream error: ${err.message}`);
+    await injectStreamOnCallLeg(callSid, wsHost);
+  }
+}
+
+// Fallback: inject stream directly onto the inbound call leg
+async function injectStreamOnCallLeg(callSid, wsHost) {
+  console.log(`[CALL] Fallback: injecting stream on call leg ${callSid}`);
+  try {
+    // We use <Start><Stream> which runs alongside the existing call without replacing it
+    await getClient().calls(callSid).update({
+      twiml: `<Response>
+        <Start>
+          <Stream url="wss://${wsHost}/media-stream" track="inbound_track">
+            <Parameter name="callSid" value="${callSid}"/>
+          </Stream>
+        </Start>
+        <Pause length="3600"/>
+      </Response>`,
+    });
+    console.log(`[CALL] Stream injected on call leg ${callSid}`);
+  } catch (err) {
+    console.error(`[CALL] Fallback stream inject failed: ${err.message}`);
   }
 }
 
