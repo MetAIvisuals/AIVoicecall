@@ -4,24 +4,28 @@ import { synthesizeSpeech } from '../services/elevenlabs.js';
 import { sessionStore } from '../services/sessionStore.js';
 import { injectAudioIntoCall } from '../services/twilioClient.js';
 
-/**
- * Handles the Twilio Media Stream WebSocket.
- *
- * Twilio sends audio as base64-encoded mulaw chunks (20ms each).
- * We buffer them, run silence detection, then when the caller
- * pauses we: transcribe → translate → TTS → inject back into the call.
- */
 export function handleMediaStream(ws, req) {
   let callSid = null;
   let audioBuffer = Buffer.alloc(0);
   let silenceTimer = null;
   let streamSid = null;
-  let isSpeaking = false;
+  let keepAliveInterval = null;
 
-  const SILENCE_THRESHOLD_MS = 1200; // wait this long after last audio chunk
-  const MIN_AUDIO_MS = 400;           // ignore clips shorter than this
-  const SAMPLE_RATE = 8000;           // Twilio mulaw = 8kHz
-  const BYTES_PER_MS = SAMPLE_RATE / 1000; // 8 bytes/ms
+  const SILENCE_THRESHOLD_MS = 1200;
+  const MIN_AUDIO_MS = 400;
+  const SAMPLE_RATE = 8000;
+  const BYTES_PER_MS = SAMPLE_RATE / 1000;
+
+  // Send a ping every 10 seconds to keep Railway from closing the WebSocket
+  keepAliveInterval = setInterval(() => {
+    if (ws.readyState === ws.OPEN) {
+      ws.ping();
+    }
+  }, 10000);
+
+  ws.on('pong', () => {
+    // Railway responded to ping — connection is alive
+  });
 
   ws.on('message', async (data) => {
     let msg;
@@ -41,17 +45,14 @@ export function handleMediaStream(ws, req) {
       case 'media': {
         const chunk = Buffer.from(msg.media.payload, 'base64');
         audioBuffer = Buffer.concat([audioBuffer, chunk]);
-        isSpeaking = true;
 
-        // Reset silence timer on every incoming chunk
         clearTimeout(silenceTimer);
         silenceTimer = setTimeout(async () => {
-          isSpeaking = false;
           const capturedBuffer = audioBuffer;
           audioBuffer = Buffer.alloc(0);
 
           const durationMs = capturedBuffer.length / BYTES_PER_MS;
-          if (durationMs < MIN_AUDIO_MS) return; // too short, skip
+          if (durationMs < MIN_AUDIO_MS) return;
 
           console.log(`[STREAM] Processing ${Math.round(durationMs)}ms of audio`);
           await processUtterance(capturedBuffer, callSid, streamSid);
@@ -70,19 +71,21 @@ export function handleMediaStream(ws, req) {
   ws.on('close', () => {
     console.log('[STREAM] WebSocket closed');
     clearTimeout(silenceTimer);
+    clearInterval(keepAliveInterval);
+  });
+
+  ws.on('error', (err) => {
+    console.error('[STREAM] WebSocket error:', err.message);
+    clearInterval(keepAliveInterval);
   });
 }
 
-/**
- * Core pipeline: raw mulaw buffer → translated speech injected into call
- */
 async function processUtterance(mulawBuffer, callSid, streamSid) {
   const session = callSid ? sessionStore.get(callSid) : null;
   const callerLang = session?.callerLang || 'en';
   const targetLang = session?.targetLang || 'de';
 
   try {
-    // 1. Transcribe with Whisper
     console.log('[PIPELINE] Transcribing...');
     const originalText = await transcribeAudio(mulawBuffer, callerLang);
     if (!originalText || originalText.trim().length < 2) {
@@ -91,22 +94,18 @@ async function processUtterance(mulawBuffer, callSid, streamSid) {
     }
     console.log(`[PIPELINE] Transcribed: "${originalText}"`);
 
-    // 2. Translate
     console.log('[PIPELINE] Translating...');
     const translatedText = await translateText(originalText, callerLang, targetLang);
     console.log(`[PIPELINE] Translated: "${translatedText}"`);
 
-    // 3. Text-to-Speech via ElevenLabs
     console.log('[PIPELINE] Synthesizing speech...');
     const audioUrl = await synthesizeSpeech(translatedText, targetLang);
     console.log(`[PIPELINE] Audio ready: ${audioUrl}`);
 
-    // 4. Inject translated audio into the Twilio call
     if (callSid && audioUrl) {
       await injectAudioIntoCall(callSid, audioUrl);
     }
 
-    // 5. Save to session transcript
     if (session) {
       session.transcript.push({
         timestamp: new Date().toISOString(),
