@@ -35,7 +35,7 @@ export function handleInboundCall(req, res) {
   const start = twiml.start();
   const stream = start.stream({
     url: `wss://${wsHost}/media-stream`,
-    track: 'inbound_track',
+    track: 'both_tracks',
   });
   stream.parameter({ name: 'callSid', value: callSid });
 

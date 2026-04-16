@@ -10,36 +10,37 @@ export function handleMediaStream(ws, req) {
   let silenceTimer = null;
   let streamSid = null;
   let keepAliveInterval = null;
+  let messageCount = 0;
 
   const SILENCE_THRESHOLD_MS = 1200;
   const MIN_AUDIO_MS = 400;
   const SAMPLE_RATE = 8000;
   const BYTES_PER_MS = SAMPLE_RATE / 1000;
 
-  // Send a ping every 10 seconds to keep Railway from closing the WebSocket
   keepAliveInterval = setInterval(() => {
-    if (ws.readyState === ws.OPEN) {
-      ws.ping();
-    }
-  }, 10000);
-
-  ws.on('pong', () => {
-    // Railway responded to ping — connection is alive
-  });
+    if (ws.readyState === ws.OPEN) ws.ping();
+  }, 5000);
 
   ws.on('message', async (data) => {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
 
+    messageCount++;
+    // Log every message type so we can see what's arriving
+    if (messageCount <= 20 || msg.event === 'stop') {
+      console.log(`[STREAM] msg #${messageCount} event="${msg.event}"`);
+    }
+
     switch (msg.event) {
       case 'connected':
-        console.log('[STREAM] Connected');
+        console.log('[STREAM] Connected, protocol:', JSON.stringify(msg));
         break;
 
       case 'start':
         streamSid = msg.start.streamSid;
         callSid = msg.start.customParameters?.callSid || null;
         console.log(`[STREAM] Started — CallSid: ${callSid}, StreamSid: ${streamSid}`);
+        console.log(`[STREAM] Start details:`, JSON.stringify(msg.start));
         break;
 
       case 'media': {
@@ -50,26 +51,23 @@ export function handleMediaStream(ws, req) {
         silenceTimer = setTimeout(async () => {
           const capturedBuffer = audioBuffer;
           audioBuffer = Buffer.alloc(0);
-
           const durationMs = capturedBuffer.length / BYTES_PER_MS;
           if (durationMs < MIN_AUDIO_MS) return;
-
           console.log(`[STREAM] Processing ${Math.round(durationMs)}ms of audio`);
           await processUtterance(capturedBuffer, callSid, streamSid);
         }, SILENCE_THRESHOLD_MS);
-
         break;
       }
 
       case 'stop':
-        console.log('[STREAM] Stopped');
+        console.log(`[STREAM] Stopped after ${messageCount} messages`);
         clearTimeout(silenceTimer);
         break;
     }
   });
 
-  ws.on('close', () => {
-    console.log('[STREAM] WebSocket closed');
+  ws.on('close', (code, reason) => {
+    console.log(`[STREAM] WebSocket closed — code: ${code}, reason: ${reason}, messages received: ${messageCount}`);
     clearTimeout(silenceTimer);
     clearInterval(keepAliveInterval);
   });
@@ -102,9 +100,7 @@ async function processUtterance(mulawBuffer, callSid, streamSid) {
     const audioUrl = await synthesizeSpeech(translatedText, targetLang);
     console.log(`[PIPELINE] Audio ready: ${audioUrl}`);
 
-    if (callSid && audioUrl) {
-      await injectAudioIntoCall(callSid, audioUrl);
-    }
+    if (callSid && audioUrl) await injectAudioIntoCall(callSid, audioUrl);
 
     if (session) {
       session.transcript.push({
@@ -116,7 +112,6 @@ async function processUtterance(mulawBuffer, callSid, streamSid) {
       });
       sessionStore.set(callSid, session);
     }
-
   } catch (err) {
     console.error('[PIPELINE] Error:', err.message);
   }
