@@ -10,7 +10,7 @@ export function handleMediaStream(ws, req) {
   let silenceTimer = null;
   let streamSid = null;
   let keepAliveInterval = null;
-  let messageCount = 0;
+  let mediaCount = 0;
 
   const SILENCE_THRESHOLD_MS = 1200;
   const MIN_AUDIO_MS = 400;
@@ -25,25 +25,24 @@ export function handleMediaStream(ws, req) {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
 
-    messageCount++;
-    // Log every message type so we can see what's arriving
-    if (messageCount <= 20 || msg.event === 'stop') {
-      console.log(`[STREAM] msg #${messageCount} event="${msg.event}"`);
-    }
-
     switch (msg.event) {
       case 'connected':
-        console.log('[STREAM] Connected, protocol:', JSON.stringify(msg));
+        console.log('[STREAM] Connected');
         break;
 
       case 'start':
         streamSid = msg.start.streamSid;
         callSid = msg.start.customParameters?.callSid || null;
-        console.log(`[STREAM] Started — CallSid: ${callSid}, StreamSid: ${streamSid}`);
-        console.log(`[STREAM] Start details:`, JSON.stringify(msg.start));
+        console.log(`[STREAM] Started — CallSid: ${callSid}, tracks: ${JSON.stringify(msg.start.tracks)}`);
         break;
 
       case 'media': {
+        // Only process inbound track (caller's voice)
+        if (msg.media.track !== 'inbound') break;
+
+        mediaCount++;
+        if (mediaCount === 1) console.log('[STREAM] First inbound audio chunk received');
+
         const chunk = Buffer.from(msg.media.payload, 'base64');
         audioBuffer = Buffer.concat([audioBuffer, chunk]);
 
@@ -52,7 +51,11 @@ export function handleMediaStream(ws, req) {
           const capturedBuffer = audioBuffer;
           audioBuffer = Buffer.alloc(0);
           const durationMs = capturedBuffer.length / BYTES_PER_MS;
-          if (durationMs < MIN_AUDIO_MS) return;
+          console.log(`[STREAM] Silence detected — buffered ${Math.round(durationMs)}ms`);
+          if (durationMs < MIN_AUDIO_MS) {
+            console.log('[STREAM] Too short, skipping');
+            return;
+          }
           console.log(`[STREAM] Processing ${Math.round(durationMs)}ms of audio`);
           await processUtterance(capturedBuffer, callSid, streamSid);
         }, SILENCE_THRESHOLD_MS);
@@ -60,14 +63,14 @@ export function handleMediaStream(ws, req) {
       }
 
       case 'stop':
-        console.log(`[STREAM] Stopped after ${messageCount} messages`);
+        console.log(`[STREAM] Stopped — inbound chunks received: ${mediaCount}`);
         clearTimeout(silenceTimer);
         break;
     }
   });
 
   ws.on('close', (code, reason) => {
-    console.log(`[STREAM] WebSocket closed — code: ${code}, reason: ${reason}, messages received: ${messageCount}`);
+    console.log(`[STREAM] WebSocket closed — code: ${code}`);
     clearTimeout(silenceTimer);
     clearInterval(keepAliveInterval);
   });
