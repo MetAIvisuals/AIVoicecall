@@ -4,36 +4,43 @@ import { synthesizeSpeech } from '../services/elevenlabs.js';
 import { sessionStore } from '../services/sessionStore.js';
 import { injectAudioIntoCall } from '../services/twilioClient.js';
 
-// Detect if a mulaw chunk contains actual speech vs silence
-// mulaw silence is encoded as 0xFF (127 in signed) — check average energy
+// mulaw silence = 0xFF bytes. Measure deviation to detect speech.
 function isSpeech(chunk) {
   let energy = 0;
   for (let i = 0; i < chunk.length; i++) {
-    // mulaw 0xFF = silence, deviation from 0xFF = sound
     energy += Math.abs(chunk[i] - 0xFF);
   }
-  const avgEnergy = energy / chunk.length;
-  return avgEnergy > 2; // threshold — above 2 = speech detected
+  return (energy / chunk.length) > 2;
 }
 
 export function handleMediaStream(ws, req) {
   let callSid = null;
   let audioBuffer = Buffer.alloc(0);
-  let silenceTimer = null;
   let streamSid = null;
   let keepAliveInterval = null;
-  let mediaCount = 0;
+  let processingInterval = null;
+  let totalChunks = 0;
   let speechChunks = 0;
-  let isSpeaking = false;
 
-  const SILENCE_THRESHOLD_MS = 1000; // stop collecting after 1s of silence
-  const MIN_AUDIO_MS = 300;
   const SAMPLE_RATE = 8000;
   const BYTES_PER_MS = SAMPLE_RATE / 1000;
+  const MIN_AUDIO_MS = 500;
+  const PROCESS_EVERY_MS = 5000; // process whatever we have every 5 seconds
 
   keepAliveInterval = setInterval(() => {
     if (ws.readyState === ws.OPEN) ws.ping();
   }, 5000);
+
+  // Every 5 seconds, flush the buffer and run the pipeline
+  processingInterval = setInterval(async () => {
+    if (audioBuffer.length === 0) return;
+    const capturedBuffer = audioBuffer;
+    audioBuffer = Buffer.alloc(0);
+    const durationMs = capturedBuffer.length / BYTES_PER_MS;
+    if (durationMs < MIN_AUDIO_MS) return;
+    console.log(`[STREAM] Flushing ${Math.round(durationMs)}ms of speech for processing`);
+    await processUtterance(capturedBuffer, callSid, streamSid);
+  }, PROCESS_EVERY_MS);
 
   ws.on('message', async (data) => {
     let msg;
@@ -52,44 +59,26 @@ export function handleMediaStream(ws, req) {
 
       case 'media': {
         if (msg.media.track !== 'inbound') break;
-
-        mediaCount++;
+        totalChunks++;
         const chunk = Buffer.from(msg.media.payload, 'base64');
-        const speaking = isSpeech(chunk);
-
-        if (speaking) {
-          if (!isSpeaking) {
-            console.log('[STREAM] Speech started');
-            isSpeaking = true;
-          }
+        // Only buffer speech, skip silence
+        if (isSpeech(chunk)) {
           speechChunks++;
           audioBuffer = Buffer.concat([audioBuffer, chunk]);
-
-          // Reset silence timer whenever speech is detected
-          clearTimeout(silenceTimer);
-          silenceTimer = setTimeout(async () => {
-            isSpeaking = false;
-            const capturedBuffer = audioBuffer;
-            audioBuffer = Buffer.alloc(0);
-            const durationMs = capturedBuffer.length / BYTES_PER_MS;
-            console.log(`[STREAM] Speech ended — ${Math.round(durationMs)}ms captured`);
-            if (durationMs < MIN_AUDIO_MS) return;
-            await processUtterance(capturedBuffer, callSid, streamSid);
-          }, SILENCE_THRESHOLD_MS);
         }
         break;
       }
 
       case 'stop':
-        console.log(`[STREAM] Stopped — total: ${mediaCount} chunks, speech: ${speechChunks} chunks`);
-        clearTimeout(silenceTimer);
-        // Process any remaining buffered speech
+        console.log(`[STREAM] Stopped — total: ${totalChunks}, speech: ${speechChunks}`);
+        clearInterval(processingInterval);
+        // Flush remaining buffer
         if (audioBuffer.length > 0) {
           const capturedBuffer = audioBuffer;
           audioBuffer = Buffer.alloc(0);
           const durationMs = capturedBuffer.length / BYTES_PER_MS;
           if (durationMs >= MIN_AUDIO_MS) {
-            console.log(`[STREAM] Processing remaining ${Math.round(durationMs)}ms on stop`);
+            console.log(`[STREAM] Final flush: ${Math.round(durationMs)}ms`);
             await processUtterance(capturedBuffer, callSid, streamSid);
           }
         }
@@ -99,13 +88,14 @@ export function handleMediaStream(ws, req) {
 
   ws.on('close', (code) => {
     console.log(`[STREAM] WebSocket closed — code: ${code}`);
-    clearTimeout(silenceTimer);
     clearInterval(keepAliveInterval);
+    clearInterval(processingInterval);
   });
 
   ws.on('error', (err) => {
     console.error('[STREAM] WebSocket error:', err.message);
     clearInterval(keepAliveInterval);
+    clearInterval(processingInterval);
   });
 }
 
