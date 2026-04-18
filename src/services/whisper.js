@@ -1,8 +1,8 @@
 import OpenAI from 'openai';
-import { Readable } from 'stream';
-import { writeFileSync, unlinkSync } from 'fs';
+import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { createReadStream } from 'fs';
 
 let _openai = null;
 function getClient() {
@@ -10,41 +10,36 @@ function getClient() {
   return _openai;
 }
 
-/**
- * Transcribes a mulaw audio buffer using OpenAI Whisper.
- * Twilio sends audio as 8kHz mulaw — we write it to a temp WAV file
- * with the correct headers before sending to Whisper.
- */
 export async function transcribeAudio(mulawBuffer, languageHint = 'en') {
-  const wavBuffer = mulawToWav(mulawBuffer);
-  const tmpPath = join(tmpdir(), `utterance_${Date.now()}.wav`);
+  const tmpPath = join(tmpdir(), `utterance_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
 
   try {
+    const wavBuffer = mulawToWav(mulawBuffer);
     writeFileSync(tmpPath, wavBuffer);
 
-    const file = await OpenAI.toFile(
-      Readable.from(wavBuffer),
-      'audio.wav',
-      { type: 'audio/wav' }
-    );
+    console.log(`[WHISPER] Sending ${wavBuffer.length} bytes to Whisper, lang=${languageHint}`);
 
     const response = await getClient().audio.transcriptions.create({
       model: 'whisper-1',
-      file,
+      file: createReadStream(tmpPath),
       language: languageHint,
       response_format: 'text',
     });
 
-    return typeof response === 'string' ? response.trim() : response?.text?.trim() || '';
+    const text = typeof response === 'string' ? response.trim() : (response?.text?.trim() || '');
+    console.log(`[WHISPER] Result: "${text}"`);
+    return text;
+
+  } catch (err) {
+    console.error(`[WHISPER] Error: ${err.message}`);
+    // Log more detail if available
+    if (err.status) console.error(`[WHISPER] Status: ${err.status}, ${JSON.stringify(err.error)}`);
+    throw err;
   } finally {
-    try { unlinkSync(tmpPath); } catch {}
+    try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
   }
 }
 
-/**
- * Converts raw 8kHz mulaw PCM to a WAV file buffer.
- * WAV header = 44 bytes. mulaw samples are 8-bit.
- */
 function mulawToWav(mulawBuffer) {
   const sampleRate = 8000;
   const numChannels = 1;
@@ -53,25 +48,19 @@ function mulawToWav(mulawBuffer) {
   const blockAlign = numChannels * bitsPerSample / 8;
   const dataSize = mulawBuffer.length;
   const headerSize = 44;
-
   const wav = Buffer.alloc(headerSize + dataSize);
 
-  // RIFF chunk
   wav.write('RIFF', 0);
   wav.writeUInt32LE(36 + dataSize, 4);
   wav.write('WAVE', 8);
-
-  // fmt chunk — PCM mulaw = audioFormat 7
   wav.write('fmt ', 12);
-  wav.writeUInt32LE(16, 16);        // chunk size
-  wav.writeUInt16LE(7, 20);         // audio format: mulaw
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(7, 20);        // mulaw
   wav.writeUInt16LE(numChannels, 22);
   wav.writeUInt32LE(sampleRate, 24);
   wav.writeUInt32LE(byteRate, 28);
   wav.writeUInt16LE(blockAlign, 32);
   wav.writeUInt16LE(bitsPerSample, 36);
-
-  // data chunk
   wav.write('data', 38);
   wav.writeUInt32LE(dataSize, 42);
   mulawBuffer.copy(wav, headerSize);
