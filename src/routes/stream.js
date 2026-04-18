@@ -4,7 +4,6 @@ import { synthesizeSpeech } from '../services/elevenlabs.js';
 import { sessionStore } from '../services/sessionStore.js';
 import { injectAudioIntoCall } from '../services/twilioClient.js';
 
-// mulaw silence = 0xFF bytes. Measure deviation to detect speech.
 function isSpeech(chunk) {
   let energy = 0;
   for (let i = 0; i < chunk.length; i++) {
@@ -25,13 +24,12 @@ export function handleMediaStream(ws, req) {
   const SAMPLE_RATE = 8000;
   const BYTES_PER_MS = SAMPLE_RATE / 1000;
   const MIN_AUDIO_MS = 500;
-  const PROCESS_EVERY_MS = 5000; // process whatever we have every 5 seconds
+  const PROCESS_EVERY_MS = 5000;
 
   keepAliveInterval = setInterval(() => {
     if (ws.readyState === ws.OPEN) ws.ping();
   }, 5000);
 
-  // Every 5 seconds, flush the buffer and run the pipeline
   processingInterval = setInterval(async () => {
     if (audioBuffer.length === 0) return;
     const capturedBuffer = audioBuffer;
@@ -61,7 +59,6 @@ export function handleMediaStream(ws, req) {
         if (msg.media.track !== 'inbound') break;
         totalChunks++;
         const chunk = Buffer.from(msg.media.payload, 'base64');
-        // Only buffer speech, skip silence
         if (isSpeech(chunk)) {
           speechChunks++;
           audioBuffer = Buffer.concat([audioBuffer, chunk]);
@@ -72,7 +69,6 @@ export function handleMediaStream(ws, req) {
       case 'stop':
         console.log(`[STREAM] Stopped — total: ${totalChunks}, speech: ${speechChunks}`);
         clearInterval(processingInterval);
-        // Flush remaining buffer
         if (audioBuffer.length > 0) {
           const capturedBuffer = audioBuffer;
           audioBuffer = Buffer.alloc(0);
@@ -104,36 +100,61 @@ async function processUtterance(mulawBuffer, callSid, streamSid) {
   const callerLang = session?.callerLang || 'en';
   const targetLang = session?.targetLang || 'de';
 
+  // Step 1: Transcribe
+  let originalText;
   try {
     console.log('[PIPELINE] Transcribing...');
-    const originalText = await transcribeAudio(mulawBuffer, callerLang);
+    originalText = await transcribeAudio(mulawBuffer, callerLang);
     if (!originalText || originalText.trim().length < 2) {
       console.log('[PIPELINE] Empty transcription, skipping');
       return;
     }
     console.log(`[PIPELINE] Transcribed: "${originalText}"`);
+  } catch (err) {
+    console.error('[PIPELINE] Transcription failed:', err.message);
+    return;
+  }
 
+  // Step 2: Translate
+  let translatedText;
+  try {
     console.log('[PIPELINE] Translating...');
-    const translatedText = await translateText(originalText, callerLang, targetLang);
+    translatedText = await translateText(originalText, callerLang, targetLang);
     console.log(`[PIPELINE] Translated: "${translatedText}"`);
+  } catch (err) {
+    console.error('[PIPELINE] Translation failed:', err.message);
+    return;
+  }
 
+  // Step 3: TTS
+  let audioUrl;
+  try {
     console.log('[PIPELINE] Synthesizing speech...');
-    const audioUrl = await synthesizeSpeech(translatedText, targetLang);
+    audioUrl = await synthesizeSpeech(translatedText, targetLang);
     console.log(`[PIPELINE] Audio ready: ${audioUrl}`);
+  } catch (err) {
+    console.error('[PIPELINE] TTS failed:', err.message);
+    return;
+  }
 
-    if (callSid && audioUrl) await injectAudioIntoCall(callSid, audioUrl);
-
-    if (session) {
-      session.transcript.push({
-        timestamp: new Date().toISOString(),
-        speaker: 'caller',
-        original: originalText,
-        translated: translatedText,
-        lang: { from: callerLang, to: targetLang },
-      });
-      sessionStore.set(callSid, session);
+  // Step 4: Inject into call
+  try {
+    if (callSid && audioUrl) {
+      await injectAudioIntoCall(callSid, audioUrl);
     }
   } catch (err) {
-    console.error('[PIPELINE] Error:', err.message);
+    console.error('[PIPELINE] Inject failed:', err.message);
+  }
+
+  // Step 5: Save transcript
+  if (session) {
+    session.transcript.push({
+      timestamp: new Date().toISOString(),
+      speaker: 'caller',
+      original: originalText,
+      translated: translatedText,
+      lang: { from: callerLang, to: targetLang },
+    });
+    sessionStore.set(callSid, session);
   }
 }
