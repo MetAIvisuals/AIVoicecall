@@ -1,27 +1,33 @@
-import OpenAI from 'openai';
-import { writeFileSync, unlinkSync, existsSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { createReadStream } from 'fs';
+import OpenAI, { toFile } from 'openai';
 
 let _openai = null;
 function getClient() {
-  if (!_openai) _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  if (!_openai) _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 3, timeout: 30000 });
   return _openai;
 }
 
-export async function transcribeAudio(mulawBuffer, languageHint = 'en') {
-  const tmpPath = join(tmpdir(), `utterance_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
+const MAX_PARALLEL = 2;
+let active = 0;
+const waiting = [];
 
+function acquire() {
+  if (active < MAX_PARALLEL) { active++; return Promise.resolve(); }
+  return new Promise((resolve) => waiting.push(resolve));
+}
+function release() {
+  const next = waiting.shift();
+  if (next) next(); else active--;
+}
+
+export async function transcribeAudio(mulawBuffer, languageHint = 'en') {
+  await acquire();
   try {
     const wavBuffer = mulawToWav(mulawBuffer);
-    writeFileSync(tmpPath, wavBuffer);
-
     console.log(`[WHISPER] Sending ${wavBuffer.length} bytes to Whisper, lang=${languageHint}`);
 
     const response = await getClient().audio.transcriptions.create({
       model: 'whisper-1',
-      file: createReadStream(tmpPath),
+      file: await toFile(wavBuffer, 'utterance.wav', { type: 'audio/wav' }),
       language: languageHint,
       response_format: 'text',
     });
@@ -29,41 +35,53 @@ export async function transcribeAudio(mulawBuffer, languageHint = 'en') {
     const text = typeof response === 'string' ? response.trim() : (response?.text?.trim() || '');
     console.log(`[WHISPER] Result: "${text}"`);
     return text;
-
   } catch (err) {
     console.error(`[WHISPER] Error: ${err.message}`);
-    // Log more detail if available
     if (err.status) console.error(`[WHISPER] Status: ${err.status}, ${JSON.stringify(err.error)}`);
+    if (err.cause) console.error(`[WHISPER] Cause: ${err.cause.code || ''} ${err.cause.message || err.cause}`);
+    if (!process.env.OPENAI_API_KEY) console.error('[WHISPER] OPENAI_API_KEY is not set');
     throw err;
   } finally {
-    try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
+    release();
   }
 }
 
-function mulawToWav(mulawBuffer) {
-  const sampleRate = 8000;
-  const numChannels = 1;
-  const bitsPerSample = 8;
-  const byteRate = sampleRate * numChannels * bitsPerSample / 8;
-  const blockAlign = numChannels * bitsPerSample / 8;
-  const dataSize = mulawBuffer.length;
-  const headerSize = 44;
-  const wav = Buffer.alloc(headerSize + dataSize);
+const MULAW_DECODE = new Int16Array(256);
+for (let i = 0; i < 256; i++) {
+  const u = ~i & 0xff;
+  const sign = u & 0x80;
+  const exponent = (u >> 4) & 0x07;
+  const mantissa = u & 0x0f;
+  const sample = (((mantissa << 3) + 0x84) << exponent) - 0x84;
+  MULAW_DECODE[i] = sign ? -sample : sample;
+}
 
+// 8 kHz mulaw -> 16 kHz 16-bit PCM WAV (linear interpolation upsampling)
+function mulawToWav(mulawBuffer) {
+  const n = mulawBuffer.length;
+  const pcm = Buffer.alloc(n * 4);
+  for (let i = 0; i < n; i++) {
+    const cur = MULAW_DECODE[mulawBuffer[i]];
+    const next = i + 1 < n ? MULAW_DECODE[mulawBuffer[i + 1]] : cur;
+    pcm.writeInt16LE(cur, i * 4);
+    pcm.writeInt16LE((cur + next) >> 1, i * 4 + 2);
+  }
+
+  const sampleRate = 16000;
+  const wav = Buffer.alloc(44 + pcm.length);
   wav.write('RIFF', 0);
-  wav.writeUInt32LE(36 + dataSize, 4);
+  wav.writeUInt32LE(36 + pcm.length, 4);
   wav.write('WAVE', 8);
   wav.write('fmt ', 12);
   wav.writeUInt32LE(16, 16);
-  wav.writeUInt16LE(7, 20);        // mulaw
-  wav.writeUInt16LE(numChannels, 22);
+  wav.writeUInt16LE(1, 20);              // PCM
+  wav.writeUInt16LE(1, 22);              // mono
   wav.writeUInt32LE(sampleRate, 24);
-  wav.writeUInt32LE(byteRate, 28);
-  wav.writeUInt16LE(blockAlign, 32);
-  wav.writeUInt16LE(bitsPerSample, 36);
-  wav.write('data', 38);
-  wav.writeUInt32LE(dataSize, 42);
-  mulawBuffer.copy(wav, headerSize);
-
+  wav.writeUInt32LE(sampleRate * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36);
+  wav.writeUInt32LE(pcm.length, 40);
+  pcm.copy(wav, 44);
   return wav;
 }
