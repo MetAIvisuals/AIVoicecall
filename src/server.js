@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { handleInboundCall, handleCallAnswered, handleCallStatus } from './routes/call.js';
 import { handleMediaStream } from './routes/stream.js';
 import { sessionStore } from './services/sessionStore.js';
+import audioRouter from './routes/audio.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -19,6 +20,7 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 
+app.use(audioRouter);
 app.post('/call/inbound', handleInboundCall);
 app.post('/call/target-answered', handleCallAnswered);
 app.post('/call/status', handleCallStatus);
