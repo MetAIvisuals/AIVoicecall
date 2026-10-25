@@ -40,3 +40,17 @@ server.listen(PORT, () => {
   console.log(`📞 Twilio webhook: POST /call/inbound`);
   console.log(`🔌 Media stream:   ws://localhost:${PORT}/media-stream\n`);
 });
+
+// Startup self-test: verifies OpenAI key/quota/connectivity independent of the SDK
+(async () => {
+  const key = process.env.OPENAI_API_KEY || '';
+  if (!key) return console.error('[SELFTEST] OPENAI_API_KEY is not set');
+  if (key !== key.trim() || /["'\s]/.test(key)) console.error('[SELFTEST] OPENAI_API_KEY contains whitespace or quotes');
+  try {
+    const r = await fetch('https://api.openai.com/v1/models', { headers: { Authorization: `Bearer ${key.trim()}` } });
+    const body = r.ok ? '' : (await r.text()).slice(0, 300);
+    console.log(`[SELFTEST] OpenAI /v1/models -> ${r.status} ${body}`);
+  } catch (err) {
+    console.error(`[SELFTEST] OpenAI unreachable: ${err.message} ${err.cause?.code || ''}`);
+  }
+})();
