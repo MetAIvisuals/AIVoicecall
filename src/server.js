@@ -6,7 +6,7 @@ import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { handleInboundCall, handleCallAnswered, handleCallStatus } from './routes/call.js';
+import { handleInboundCall, handleMenu, handleCallAnswered, handleCallStatus } from './routes/call.js';
 import { handleMediaStream } from './routes/stream.js';
 import { sessionStore } from './services/sessionStore.js';
 import audioRouter from './routes/audio.js';
@@ -22,6 +22,7 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 app.use(audioRouter);
 app.post('/call/inbound', handleInboundCall);
+app.post('/call/menu/:step', handleMenu);
 app.post('/call/target-answered', handleCallAnswered);
 app.post('/call/status', handleCallStatus);
 

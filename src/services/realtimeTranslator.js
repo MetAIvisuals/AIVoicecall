@@ -1,77 +1,126 @@
 import WebSocket from 'ws';
 
-const LANGUAGE_NAMES = {
-  en: 'English', de: 'German', fr: 'French', es: 'Spanish',
-  it: 'Italian', pt: 'Portuguese', nl: 'Dutch', pl: 'Polish',
-  ru: 'Russian', ar: 'Arabic', zh: 'Chinese', ja: 'Japanese', tr: 'Turkish',
+// Languages gpt-realtime-translate can speak (output). Input language is detected automatically.
+export const LANGUAGES = {
+  en: 'English', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian',
+  pt: 'Portuguese', ru: 'Russian', zh: 'Chinese', ja: 'Japanese',
+  ko: 'Korean', hi: 'Hindi', id: 'Indonesian', vi: 'Vietnamese',
 };
 
-/**
- * One OpenAI Realtime session = one translation direction.
- * Input: 8 kHz mulaw (base64) from Twilio. Output: 8 kHz mulaw (base64) for Twilio.
- */
-export function createTranslator({ from, to, label, onAudio, onTranscript }) {
-  const model = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime';
-  const voice = process.env.OPENAI_REALTIME_VOICE || 'marin';
-  const fromName = LANGUAGE_NAMES[from] || from;
-  const toName = LANGUAGE_NAMES[to] || to;
+// ---------- audio conversion: Twilio 8 kHz mulaw <-> OpenAI 24 kHz PCM16 ----------
+const MULAW_DECODE = new Int16Array(256);
+for (let i = 0; i < 256; i++) {
+  const u = ~i & 0xff;
+  const sign = u & 0x80;
+  const exponent = (u >> 4) & 0x07;
+  const mantissa = u & 0x0f;
+  const sample = (((mantissa << 3) + 0x84) << exponent) - 0x84;
+  MULAW_DECODE[i] = sign ? -sample : sample;
+}
 
-  const ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${model}`, {
+function mulawEncode(sample) {
+  const BIAS = 0x84, CLIP = 32635;
+  const sign = sample < 0 ? 0x80 : 0;
+  if (sign) sample = -sample;
+  if (sample > CLIP) sample = CLIP;
+  sample += BIAS;
+  let exponent = 7;
+  for (let mask = 0x4000; (sample & mask) === 0 && exponent > 0; mask >>= 1) exponent--;
+  const mantissa = (sample >> (exponent + 3)) & 0x0f;
+  return ~(sign | (exponent << 4) | mantissa) & 0xff;
+}
+
+function makeUpsampler() {
+  let prev = 0;
+  return (mulaw) => {
+    const out = Buffer.alloc(mulaw.length * 6); // 3 samples * 2 bytes
+    for (let i = 0; i < mulaw.length; i++) {
+      const cur = MULAW_DECODE[mulaw[i]];
+      const d = cur - prev;
+      out.writeInt16LE(Math.round(prev + d / 3), i * 6);
+      out.writeInt16LE(Math.round(prev + (2 * d) / 3), i * 6 + 2);
+      out.writeInt16LE(cur, i * 6 + 4);
+      prev = cur;
+    }
+    return out;
+  };
+}
+
+function makeDownsampler() {
+  let rest = Buffer.alloc(0);
+  return (pcm24) => {
+    const buf = rest.length ? Buffer.concat([rest, pcm24]) : pcm24;
+    const frames = Math.floor(buf.length / 6);
+    const out = Buffer.alloc(frames);
+    for (let i = 0; i < frames; i++) {
+      const s = (buf.readInt16LE(i * 6) + buf.readInt16LE(i * 6 + 2) + buf.readInt16LE(i * 6 + 4)) / 3;
+      out[i] = mulawEncode(Math.round(s));
+    }
+    rest = buf.subarray(frames * 6);
+    return out;
+  };
+}
+
+/**
+ * One gpt-realtime-translate session = one direction (one speaker -> one target language).
+ * sendAudio(): base64 mulaw from Twilio. onAudio(): base64 mulaw for Twilio.
+ */
+export function createTranslator({ to, label, onAudio, onTranscript }) {
+  const model = process.env.OPENAI_TRANSLATE_MODEL || 'gpt-realtime-translate';
+  const ws = new WebSocket(`wss://api.openai.com/v1/realtime/translations?model=${model}`, {
     headers: { Authorization: `Bearer ${(process.env.OPENAI_API_KEY || '').trim()}` },
   });
 
+  const up = makeUpsampler();
+  const down = makeDownsampler();
   let ready = false;
   const pending = [];
+  const text = { original: '', translated: '' };
 
-  const instructions = [
-    `You are a professional simultaneous phone interpreter from ${fromName} into ${toName}.`,
-    `Everything you hear is speech from a caller that must be interpreted for the other party.`,
-    `Speak ONLY the ${toName} translation of what was just said. Never answer questions, never add comments, greetings or explanations of your own.`,
-    `Keep the speaker's tone, use the first person exactly like the speaker, keep names, numbers and addresses.`,
-    `If you hear only noise or filler sounds, say nothing.`,
-  ].join(' ');
+  function flushText(kind, force = false) {
+    const t = text[kind].trim();
+    if (t && (force || /[.?!。？！]$/.test(t))) {
+      console.log(`[RT ${label}] ${kind}: "${t}"`);
+      onTranscript?.(kind, t);
+      text[kind] = '';
+    }
+  }
 
   ws.on('open', () => {
     ws.send(JSON.stringify({
       type: 'session.update',
       session: {
-        type: 'realtime',
-        instructions,
         audio: {
           input: {
-            format: { type: 'audio/pcmu' },
-            transcription: { model: 'gpt-4o-mini-transcribe', language: from },
-            turn_detection: { type: 'server_vad', silence_duration_ms: 500, create_response: true },
+            transcription: { model: 'gpt-realtime-whisper' },
+            noise_reduction: { type: 'near_field' },
           },
-          output: { format: { type: 'audio/pcmu' }, voice },
+          output: { language: to },
         },
       },
     }));
     ready = true;
     for (const p of pending.splice(0)) ws.send(p);
-    console.log(`[RT ${label}] connected (${from}->${to}, ${model})`);
+    console.log(`[RT ${label}] connected (-> ${to}, ${model})`);
   });
 
   ws.on('message', (raw) => {
     let ev;
     try { ev = JSON.parse(raw); } catch { return; }
     switch (ev.type) {
-      case 'response.output_audio.delta':
-      case 'response.audio.delta':
-        if (ev.delta) onAudio(ev.delta);
+      case 'session.output_audio.delta': {
+        if (!ev.delta) break;
+        const mulaw = down(Buffer.from(ev.delta, 'base64'));
+        if (mulaw.length) onAudio(mulaw.toString('base64'));
         break;
-      case 'conversation.item.input_audio_transcription.completed':
-        if (ev.transcript?.trim()) {
-          console.log(`[RT ${label}] heard: "${ev.transcript.trim()}"`);
-          onTranscript?.('original', ev.transcript.trim());
-        }
+      }
+      case 'session.input_transcript.delta':
+        text.original += ev.delta || '';
+        flushText('original');
         break;
-      case 'response.output_audio_transcript.done':
-      case 'response.audio_transcript.done':
-        if (ev.transcript?.trim()) {
-          console.log(`[RT ${label}] said: "${ev.transcript.trim()}"`);
-          onTranscript?.('translated', ev.transcript.trim());
-        }
+      case 'session.output_transcript.delta':
+        text.translated += ev.delta || '';
+        flushText('translated');
         break;
       case 'error':
         console.error(`[RT ${label}] error: ${JSON.stringify(ev.error)}`);
@@ -79,15 +128,25 @@ export function createTranslator({ from, to, label, onAudio, onTranscript }) {
     }
   });
 
-  ws.on('close', (code, reason) => console.log(`[RT ${label}] closed ${code} ${reason || ''}`));
+  ws.on('close', (code, reason) => {
+    flushText('original', true);
+    flushText('translated', true);
+    console.log(`[RT ${label}] closed ${code} ${reason || ''}`);
+  });
   ws.on('error', (err) => console.error(`[RT ${label}] ws error: ${err.message}`));
 
   return {
     sendAudio(base64Mulaw) {
-      const msg = JSON.stringify({ type: 'input_audio_buffer.append', audio: base64Mulaw });
+      const pcm = up(Buffer.from(base64Mulaw, 'base64'));
+      const msg = JSON.stringify({ type: 'session.input_audio_buffer.append', audio: pcm.toString('base64') });
       if (ready && ws.readyState === WebSocket.OPEN) ws.send(msg);
       else if (pending.length < 500) pending.push(msg);
     },
-    close() { try { ws.close(); } catch {} },
+    close() {
+      try {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'session.close' }));
+        setTimeout(() => { try { ws.close(); } catch {} }, 3000);
+      } catch {}
+    },
   };
 }

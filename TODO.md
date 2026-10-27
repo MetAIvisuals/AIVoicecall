@@ -3,7 +3,8 @@
 - [ ] Whisper "Connection error" auf Railway verifizieren (Diagnose-Logs + 16 kHz PCM + Retries eingebaut; Logs prüfen auf `[WHISPER] Cause:`)
 - [x] Requests queuen (max. 2 parallel) — in whisper.js
 - [ ] Ende-zu-Ende-Test mit zwei Telefonen (EN gesprochen -> DE gehört)
-- [ ] Sprachauswahl-IVR vor der Verbindung
 - [ ] Rückrichtung: Antwort des Angerufenen (DE) als englischer Text für den Anrufer
 - [ ] Redis statt In-Memory-Sessions
 - [ ] Kostenlimit für OpenAI/ElevenLabs
+- [ ] ALLOWED_CALLERS in Railway setzen
+- [ ] Menü-Ansagen in der gewählten Sprache

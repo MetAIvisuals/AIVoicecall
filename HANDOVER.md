@@ -3,12 +3,11 @@
 **Branch:** `claude/aivoicecall-cloud-setup-1d36yj` (Railway deployt diesen Branch)
 **Railway-URL:** https://aivoicecall-production-696b.up.railway.app
 
-## Stand (27.10.)
-- OpenAI-Guthaben war leer (429) – aufgeladen.
-- Umbau: kein <Dial> mehr. Anrufer und Angerufener haben je einen eigenen bidirektionalen <Connect><Stream>; der Server ruft das Ziel per REST an.
-- Übersetzung pro Richtung über OpenAI Realtime API (`src/services/realtimeTranslator.js`, g711 μ-law rein/raus, server VAD). Jede Seite hört nur die Übersetzung.
-- Whisper/GPT/ElevenLabs-Dateien liegen noch da, werden aber nicht mehr benutzt.
-- Optional: Env `OPENAI_REALTIME_MODEL` (Standard gpt-realtime), `OPENAI_REALTIME_VOICE` (Standard marin).
+## Stand (27.10., Teil 2)
+- Erster Realtime-Test lief, aber gpt-realtime plauderte selbst ("hello, how are you") und hatte Lag.
+- Jetzt: `gpt-realtime-translate` (/v1/realtime/translations), nur Übersetzung, Eingabesprache wird erkannt. Audio wird 8 kHz μ-law <-> 24 kHz PCM16 umgerechnet (`realtimeTranslator.js`).
+- Telefonmenü: eigene Sprache (Taste 1-9), Zielsprache (1-9), Nummer mit Ländervorwahl + #. Nur # = DEFAULT_TARGET_NUMBER.
+- Optional Env `ALLOWED_CALLERS` (kommagetrennt, z. B. +43...): nur diese Nummern dürfen das Menü nutzen. Ohne Liste kann jeder Anrufer beliebige Nummern auf Twilio-Kosten anrufen.
 - Noch nicht mit echtem Anruf getestet.
 
 ## Ablauf
