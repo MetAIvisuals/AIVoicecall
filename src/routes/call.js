@@ -39,7 +39,8 @@ function askNumber(res) {
   const { serverUrl } = urls();
   const twiml = new VoiceResponse();
   const g = twiml.gather({
-    finishOnKey: '#', timeout: 4, numDigits: 16, // submits 4 s after the last digit; '#' alone = default
+    // finishOnKey '' -> '#' is captured as a normal key (Twilio treats a lone finish key as "no input")
+    finishOnKey: '', timeout: 4, numDigits: 16, // submits 4 s after the last key
     action: `${serverUrl}/call/menu/number`, method: 'POST',
   });
   g.say(SAY, 'Enter the phone number with country code, for example 4 3 for Austria.'
@@ -96,7 +97,10 @@ export function handleMenu(req, res) {
   if (step === 'askNumber') return askNumber(res);
 
   if (step === 'number') {
-    let number = (digits || '').replace(/\D/g, '');
+    const raw = digits || '';
+    let number = raw.replace(/\D/g, '');
+    if (!number && raw.includes('#')) number = ''; // '#' alone -> default number
+    else if (!number) return askNumber(res);       // nothing pressed -> ask again
     if (number.startsWith('00')) number = number.slice(2);
     number = number ? `+${number}` : (process.env.DEFAULT_TARGET_NUMBER || '');
     if (!/^\+\d{7,15}$/.test(number)) {
