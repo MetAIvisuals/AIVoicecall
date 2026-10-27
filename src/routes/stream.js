@@ -27,9 +27,13 @@ const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS || 300);
 const ECHO_MEMORY_MS = Number(process.env.ECHO_MEMORY_MS || 8000);
 const normalise = (s) => s.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '').replace(/\s+/g, ' ').trim();
 
-function noteSpoken(leg, text) {
+// Remembered on BOTH legs: a leg hears the AI voice we play into it as echo, and when the two
+// phones are within earshot of each other it also hears what the other one plays.
+function noteSpoken(pair, text) {
   const n = normalise(text);
-  if (n) leg.spoken.push({ n, at: Date.now() });
+  if (!n) return;
+  const at = Date.now();
+  for (const leg of [pair.caller, pair.callee]) leg?.spoken.push({ n, at });
 }
 
 function isEcho(leg, text) {
@@ -152,8 +156,7 @@ export function handleMediaStream(ws) {
       },
       onOutputTranscript: (text) => {
         if (!text) return;
-        const other = pairs.get(pairId)?.[otherRole];
-        if (other) noteSpoken(other, text);
+        noteSpoken(pairs.get(pairId) || {}, text);
         console.log(`[${role}] -> "${text}"`);
         addTranscript(pairId, role, 'translated', text);
       },
@@ -204,7 +207,7 @@ export function handleMediaStream(ws) {
         if (!isSpeakable(out)) return;
         const other = pairs.get(pairId)?.[otherRole];
         if (!other) return;
-        noteSpoken(other, out); // so the echo of it on that leg is recognised
+        noteSpoken(pairs.get(pairId) || {}, out); // so its echo is recognised on either phone
         const t1 = Date.now();
         let first = true;
         await speak(out, (pcm) => {
