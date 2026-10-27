@@ -1,5 +1,6 @@
 import { createTranscriber } from '../services/transcriber.js';
-import { interpret, isSpeakable, KNOWN_LANGS } from '../services/interpreter.js';
+import { createRealtime } from '../services/realtime.js';
+import { interpret, isSpeakable, detectLanguage, KNOWN_LANGS } from '../services/interpreter.js';
 import { speak } from '../services/tts.js';
 import { MULAW_DECODE, mulawEncode, rms } from '../services/audio.js';
 import { sessionStore } from '../services/sessionStore.js';
@@ -22,20 +23,30 @@ const MAX_BACKLOG_MS = Number(process.env.MAX_BACKLOG_MS || 4000);
 const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS || 200);
 const SILENT_RMS = 150;
 const SILENT_FRAME = Buffer.alloc(160, 0xff).toString('base64');
+// REALTIME=1 switches to one speech-to-speech session per leg instead of STT -> LLM -> TTS
+const USE_REALTIME = /^(1|true|yes|on)$/i.test(process.env.REALTIME || '');
 
 function newLeg() {
-  return { ws: null, streamSid: null, callSid: null, out: [], outLen: 0, gateOpenUntil: 0, echoHoldUntil: 0, speechStoppedAt: 0, chain: Promise.resolve() };
+  return { ws: null, streamSid: null, callSid: null, rt: null, out: [], outLen: 0, gateOpenUntil: 0, echoHoldUntil: 0, speechStoppedAt: 0, chain: Promise.resolve() };
 }
 
-function enqueue(leg, pcm) {
-  leg.out.push(pcm);
-  leg.outLen += pcm.length;
+// The queue holds mulaw bytes, ready to hand to Twilio: the Realtime API delivers them that
+// way already, and converting the TTS path here keeps the 20 ms pump free of per-sample work.
+function enqueueMulaw(leg, buf, silent = false) {
+  leg.out.push({ buf, silent });
+  leg.outLen += buf.length;
   if (leg.outLen > MAX_BACKLOG_MS * 8) { // falling behind: drop near-silent chunks
     leg.out = leg.out.filter((c, i) => {
-      if (i > 0 && rms(c) < SILENT_RMS) { leg.outLen -= c.length; return false; }
+      if (i > 0 && c.silent) { leg.outLen -= c.buf.length; return false; }
       return true;
     });
   }
+}
+
+function enqueuePcm(leg, pcm) {
+  const buf = Buffer.alloc(pcm.length);
+  for (let i = 0; i < pcm.length; i++) buf[i] = mulawEncode(pcm[i]);
+  enqueueMulaw(leg, buf, rms(pcm) < SILENT_RMS);
 }
 
 // called on every 20 ms frame received from a leg: send that leg one frame of its pending AI audio
@@ -45,10 +56,10 @@ function pump(leg, n) {
   let filled = 0;
   while (filled < n && leg.out.length) {
     const c = leg.out[0];
-    const k = Math.min(n - filled, c.length);
-    for (let i = 0; i < k; i++) frame[filled + i] = mulawEncode(c[i]);
+    const k = Math.min(n - filled, c.buf.length);
+    c.buf.copy(frame, filled, 0, k);
     filled += k;
-    if (k === c.length) leg.out.shift(); else leg.out[0] = c.subarray(k);
+    if (k === c.buf.length) leg.out.shift(); else c.buf = c.buf.subarray(k);
     leg.outLen -= k;
   }
   leg.ws.send(JSON.stringify({ event: 'media', streamSid: leg.streamSid, media: { payload: frame.toString('base64') } }));
@@ -65,6 +76,7 @@ export function handleMediaStream(ws) {
   let role = null;
   let otherRole = null;
   let stt = null;
+  let rt = null;
 
   function targetLangFor(session) {
     if (role === 'caller') return session?.targetLang || process.env.TARGET_LANG || 'de';
@@ -79,9 +91,49 @@ export function handleMediaStream(ws) {
       session.langCandidate = null;
       console.log(`[LANG] caller speaks ${lang}`);
       stt?.setLanguage(lang); // pin this leg's STT to it
+      // the other leg translates into the caller's language, so point it there
+      pairs.get(pairId)?.[otherRole]?.rt?.setTargetLang(lang);
     } else {
       session.langCandidate = lang; // needs a second utterance to confirm
     }
+  }
+
+  // Speech-to-speech path: the model does transcribe, translate and speak in one session,
+  // so this side only forwards audio and hands the result to the other leg.
+  function startRealtime(leg, session) {
+    let firstAudioAt = 0;
+    rt = createRealtime({
+      label: role,
+      targetLang: targetLangFor(session),
+      onAudio: (mulaw) => {
+        const other = pairs.get(pairId)?.[otherRole];
+        if (!other) return;
+        if (!firstAudioAt) {
+          firstAudioAt = Date.now();
+          if (leg.speechStoppedAt) console.log(`[LAT ${role}] ${firstAudioAt - leg.speechStoppedAt} ms end of speech -> AI voice`);
+        }
+        enqueueMulaw(other, mulaw);
+      },
+      onInputTranscript: (text, lang) => {
+        firstAudioAt = 0;
+        leg.speechStoppedAt = Date.now(); // transcript arrives about when the turn ends
+        if (!text) return;
+        console.log(`[${role}] heard "${text}"`);
+        addTranscript(pairId, role, 'original', text);
+        if (role !== 'caller') return;
+        const s = sessionStore.get(pairId);
+        if (lang) return noteCallerLang(s, lang);
+        if (s?.callerLang || !isSpeakable(text)) return;
+        // no language on the event: ask separately, off the critical path
+        detectLanguage(text).then((l) => noteCallerLang(sessionStore.get(pairId), l)).catch(() => {});
+      },
+      onOutputTranscript: (text) => {
+        if (!text) return;
+        console.log(`[${role}] -> "${text}"`);
+        addTranscript(pairId, role, 'translated', text);
+      },
+    });
+    leg.rt = rt;
   }
 
   function handleUtterance(text, sttLang) {
@@ -125,12 +177,12 @@ export function handleMediaStream(ws) {
         const t1 = Date.now();
         let first = true;
         await speak(out, (pcm) => {
+          enqueuePcm(other, pcm);
           if (first) {
             first = false;
             const parts = [sttMs === null ? null : `stt ${sttMs}`, itpMs ? `itp ${itpMs}` : 'itp skipped', `tts ${Date.now() - t1}`];
             console.log(`[LAT ${role}] ${parts.filter(Boolean).join(' + ')} = ${Date.now() - (me.speechStoppedAt || heardAt)} ms`);
           }
-          enqueue(other, pcm);
         });
       } catch (err) {
         console.error(`[PIPE ${role}] ${err.message}`);
@@ -154,21 +206,35 @@ export function handleMediaStream(ws) {
         const session = sessionStore.get(pairId);
         // the callee's language comes from the menu; the caller's is detected, so start on auto
         const known = role === 'callee' ? session?.targetLang : session?.callerLang;
-        stt = createTranscriber({
-          label: role,
-          language: known && KNOWN_LANGS.has(known) ? known : null,
-          onUtterance: handleUtterance,
-          onSpeechStopped: () => { leg.speechStoppedAt = Date.now(); },
-        });
+        if (USE_REALTIME) {
+          startRealtime(leg, session);
+        } else {
+          stt = createTranscriber({
+            label: role,
+            language: known && KNOWN_LANGS.has(known) ? known : null,
+            onUtterance: handleUtterance,
+            onSpeechStopped: () => { leg.speechStoppedAt = Date.now(); },
+          });
+        }
         console.log(`[STREAM] ${role} started — pair ${pairId}`);
         break;
       }
 
       case 'media': {
-        if (!stt || !msg.media?.payload) break;
+        if (!msg.media?.payload) break;
         const me = pairs.get(pairId)?.[role];
         if (!me) break;
         const mulaw = Buffer.from(msg.media.payload, 'base64');
+
+        if (rt) {
+          // the model's own VAD and noise reduction handle the audio; only our own
+          // voice echoing back has to be kept out, or it would be re-voiced in a loop
+          const silent = Date.now() <= me.echoHoldUntil;
+          rt.sendAudio(silent ? (mulaw.length === 160 ? SILENT_FRAME : Buffer.alloc(mulaw.length, 0xff).toString('base64')) : msg.media.payload);
+          pump(me, mulaw.length);
+          break;
+        }
+        if (!stt) break;
         const samples = new Int16Array(mulaw.length);
         for (let i = 0; i < mulaw.length; i++) samples[i] = MULAW_DECODE[mulaw[i]];
 
@@ -199,6 +265,7 @@ export function handleMediaStream(ws) {
     if (cleaned) return;
     cleaned = true;
     stt?.close();
+    rt?.close();
     const pair = pairs.get(pairId);
     if (!pair) return;
     const other = pair[otherRole];

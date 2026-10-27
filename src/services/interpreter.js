@@ -21,6 +21,27 @@ export function isSpeakable(text) {
   return true;
 }
 
+// Which language is this? Used off the critical path, to point the other leg at the caller's language.
+export async function detectLanguage(text) {
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${(process.env.OPENAI_API_KEY || '').trim()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: process.env.TRANSLATE_MODEL || 'gpt-4o-mini',
+      temperature: 0, max_tokens: 20,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: 'Identify the language of the text. Respond only with JSON: {"lang":"<ISO 639-1 code>"}.' },
+        { role: 'user', content: text },
+      ],
+    }),
+  });
+  if (!r.ok) throw new Error(`detect ${r.status}`);
+  const data = await r.json();
+  const lang = (JSON.parse(data.choices[0].message.content || '{}').lang || '').toLowerCase().slice(0, 2);
+  return KNOWN_LANGS.has(lang) ? lang : null;
+}
+
 export async function interpret(text, targetLang) {
   const model = process.env.TRANSLATE_MODEL || 'gpt-4o-mini';
   const target = langName(targetLang);
