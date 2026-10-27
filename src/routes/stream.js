@@ -20,14 +20,32 @@ const GATE_HOLD_MS = 600;
 const MAX_BACKLOG_MS = Number(process.env.MAX_BACKLOG_MS || 4000);
 // while the AI voice plays into a leg it can echo back on that leg's mic; keep the tail short
 // so speech that starts right after the translation is not swallowed
-const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS || 200);
+const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS || 300);
+// Muting the mic alone does not stop the loop: the AI voice we play into a leg comes back on
+// that leg's mic a little later and gets translated again. So remember what we said into each
+// leg for a few seconds and drop a transcript from that leg that matches it.
+const ECHO_MEMORY_MS = Number(process.env.ECHO_MEMORY_MS || 8000);
+const normalise = (s) => s.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '').replace(/\s+/g, ' ').trim();
+
+function noteSpoken(leg, text) {
+  const n = normalise(text);
+  if (n) leg.spoken.push({ n, at: Date.now() });
+}
+
+function isEcho(leg, text) {
+  const n = normalise(text);
+  if (!n) return false;
+  const cutoff = Date.now() - ECHO_MEMORY_MS;
+  leg.spoken = leg.spoken.filter((s) => s.at > cutoff);
+  return leg.spoken.some((s) => s.n === n || (n.length >= 4 && (s.n.includes(n) || n.includes(s.n))));
+}
 const SILENT_RMS = 150;
 const SILENT_FRAME = Buffer.alloc(160, 0xff).toString('base64');
 // REALTIME=1 switches to one speech-to-speech session per leg instead of STT -> LLM -> TTS
 const USE_REALTIME = /^(1|true|yes|on)$/i.test(process.env.REALTIME || '');
 
 function newLeg() {
-  return { ws: null, streamSid: null, callSid: null, rt: null, out: [], outLen: 0, gateOpenUntil: 0, echoHoldUntil: 0, speechStoppedAt: 0, chain: Promise.resolve() };
+  return { ws: null, streamSid: null, callSid: null, rt: null, spoken: [], out: [], outLen: 0, gateOpenUntil: 0, echoHoldUntil: 0, speechStoppedAt: 0, chain: Promise.resolve() };
 }
 
 // The queue holds mulaw bytes, ready to hand to Twilio: the Realtime API delivers them that
@@ -118,6 +136,7 @@ export function handleMediaStream(ws) {
         firstAudioAt = 0;
         leg.speechStoppedAt = Date.now(); // transcript arrives about when the turn ends
         if (!text) return;
+        if (isEcho(leg, text)) return console.log(`[${role}] skipped (our own voice echoed back): "${text}"`);
         console.log(`[${role}] heard "${text}"`);
         addTranscript(pairId, role, 'original', text);
         if (role !== 'caller') return;
@@ -129,6 +148,8 @@ export function handleMediaStream(ws) {
       },
       onOutputTranscript: (text) => {
         if (!text) return;
+        const other = pairs.get(pairId)?.[otherRole];
+        if (other) noteSpoken(other, text);
         console.log(`[${role}] -> "${text}"`);
         addTranscript(pairId, role, 'translated', text);
       },
@@ -146,6 +167,11 @@ export function handleMediaStream(ws) {
     // laughter, filler and noise must never be spoken — the TTS would read them out literally
     if (!isSpeakable(text)) {
       console.log(`[${role}] skipped (not speech): "${text}"`);
+      return;
+    }
+    // our own AI voice coming back on this leg's mic — translating it again would loop
+    if (isEcho(me, text)) {
+      console.log(`[${role}] skipped (our own voice echoed back): "${text}"`);
       return;
     }
 
@@ -174,6 +200,7 @@ export function handleMediaStream(ws) {
         if (!isSpeakable(out)) return;
         const other = pairs.get(pairId)?.[otherRole];
         if (!other) return;
+        noteSpoken(other, out); // so the echo of it on that leg is recognised
         const t1 = Date.now();
         let first = true;
         await speak(out, (pcm) => {

@@ -52,7 +52,8 @@ export async function interpret(text, targetLang) {
     'speaker probably meant, never correct, polish or expand it, and never invent words they did not say.',
     'Speak as the speaker does: first person, natural spoken language, same tone and register.',
     `If the utterance is already in ${target}, repeat it word for word, unchanged.`,
-    'If it is unintelligible, cut off, or only noise, laughter or filler, return an empty text.',
+    `Short utterances count: a single word, a greeting, a yes or no, a name or an unfinished sentence all get rendered in ${target} just as they are. Never leave them out.`,
+    'Return an empty text only when there are no spoken words at all.',
     'Respond only with JSON: {"lang":"<ISO 639-1 code of the utterance>","text":"<translation or empty>"}.',
   ].join('\n');
 

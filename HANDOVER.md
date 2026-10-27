@@ -20,6 +20,12 @@
 - Echo-Nachlauf 700 -> 200 ms (Echo war nicht die Ursache der Phantom-Antworten, der lange Nachlauf schnitt Sprache ab).
 - Latenz wird pro Stufe geloggt: `[LAT caller] stt 420 + itp 610 + tts 480 = 1510 ms`.
 
+### Nach dem Testanruf (alter Pfad, REALTIME war nicht gesetzt)
+- Gemessen: `stt ~500 + itp ~700-950 + tts ~500-800` = 1,6-2,5 s, dazu die 500 ms VAD-Stille davor. Der LLM-Hop ist der grösste beeinflussbare Posten -> dafür ist der Realtime-Pfad da.
+- Kurze Äusserungen fielen aus: `"Hello" -> ""`. Der strikte Prompt hielt Einzelwörter für Fragmente und gab leeren Text zurück -> am Anfang kam gar nichts. Prompt verlangt jetzt ausdrücklich auch Einzelwörter, Grüsse, Ja/Nein; leerer Text nur noch bei gar keinen Wörtern.
+- Echo ist doch real: `[callee] "Ich bin hier."` und `[caller] "You are here."` waren unsere eigene KI-Stimme, zurückgehört und erneut übersetzt. Mikrofon-Stummschaltung allein reicht nicht (das Echo kommt verzögert). Jetzt zusätzlich Echo-Erkennung auf Textebene: was wir in ein Leg sprechen, wird 8 s gemerkt (`ECHO_MEMORY_MS`) und ein passendes Transkript dieses Legs verworfen. Nachlauf wieder 300 ms.
+- Gleiche Sprache = kein Übersetzen ist Absicht, kein Bug: wer Deutsch spricht und im Menü Deutsch wählt, hört nur die KI-Stimme nachsprechen. Zum Testen eine andere Sprache wählen.
+
 ## Stand (27.10., Teil 4)
 - Wunsch: kein Original hörbar, immer dieselbe KI-Stimme, auch bei gleicher Sprache; Anrufer-Sprache automatisch.
 - gpt-realtime-translate kann das nicht (bleibt bei gleicher Sprache stumm, keine feste Stimme) -> ersetzt.
