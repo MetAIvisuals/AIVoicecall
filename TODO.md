@@ -8,4 +8,3 @@
 - [ ] Kostenlimit für OpenAI/ElevenLabs
 - [ ] ALLOWED_CALLERS in Railway setzen
 - [ ] Menü-Ansagen in der gewählten Sprache
-- [ ] Echo-Sperre testen (ECHO_TAIL_MS, Standard 400 ms); Nachteil: man kann die laufende Übersetzung nicht unterbrechen
