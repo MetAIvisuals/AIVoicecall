@@ -101,9 +101,8 @@
               <div class="transcript-list">
                 ${s.transcript.map(t => `
                   <div class="t-item">
-                    <span class="original">"${t.original}"</span>
-                    <span class="arrow">→</span>
-                    <span class="translated">"${t.translated}"</span>
+                    <span class="original">${t.speaker === 'caller' ? 'Caller' : 'Callee'} · ${t.kind === 'translated' ? 'translation' : 'original'}:</span>
+                    <span class="${t.kind === 'translated' ? 'translated' : 'original'}">"${t.text ?? t.translated ?? ''}"</span>
                   </div>
                 `).join('')}
               </div>

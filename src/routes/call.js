@@ -1,13 +1,24 @@
 import twilio from 'twilio';
 import { sessionStore } from '../services/sessionStore.js';
+import { client } from '../services/twilioClient.js';
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-function getClient() {
-  return twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+function streamTwiml(wsHost, pairId, role) {
+  const twiml = new VoiceResponse();
+  if (role === 'caller') {
+    twiml.say({ voice: 'Polly.Joanna', language: 'en-US' },
+      'Connecting your call with live translation. Start speaking once the other person answers.');
+  }
+  const stream = twiml.connect().stream({ url: `wss://${wsHost}/media-stream` });
+  stream.parameter({ name: 'pairId', value: pairId });
+  stream.parameter({ name: 'role', value: role });
+  return twiml.toString();
 }
 
-export function handleInboundCall(req, res) {
+// Caller (A) dials the Twilio number. A gets its own stream; B is called separately.
+// There is NO direct audio bridge: each side only hears the translation.
+export async function handleInboundCall(req, res) {
   const callSid = req.body.CallSid;
   const from = req.body.From;
   const targetNumber = process.env.DEFAULT_TARGET_NUMBER;
@@ -17,49 +28,43 @@ export function handleInboundCall(req, res) {
   console.log(`[CALL] Inbound from ${from}, CallSid: ${callSid}`);
 
   sessionStore.set(callSid, {
-    callSid, from, targetNumber, wsHost, serverUrl,
+    callSid, from, targetNumber,
     status: 'active', startedAt: new Date().toISOString(),
     callerLang: process.env.CALLER_LANG || 'en',
     targetLang: process.env.TARGET_LANG || 'de',
     transcript: [],
   });
 
-  // Simple approach: Start stream + Dial number directly
-  // <Start> is non-blocking, stream runs for lifetime of call
-  // <Dial> bridges to target number
-  const twiml = new VoiceResponse();
+  res.type('text/xml').send(streamTwiml(wsHost, callSid, 'caller'));
 
-  twiml.say({ voice: 'Polly.Joanna', language: 'en-US' },
-    'Connecting your call with live translation. Please wait.');
-
-  const start = twiml.start();
-  const stream = start.stream({
-    url: `wss://${wsHost}/media-stream`,
-    track: 'both_tracks',
-  });
-  stream.parameter({ name: 'callSid', value: callSid });
-
-  const dial = twiml.dial({
-    callerId: process.env.TWILIO_PHONE_NUMBER,
-    action: `${serverUrl}/call/status`,
-    method: 'POST',
-    timeout: 30,
-  });
-  dial.number(targetNumber);
-
-  const twimlStr = twiml.toString();
-  console.log(`[CALL] TwiML: ${twimlStr}`);
-  res.type('text/xml').send(twimlStr);
+  try {
+    const out = await client().calls.create({
+      to: targetNumber,
+      from: process.env.TWILIO_PHONE_NUMBER,
+      twiml: streamTwiml(wsHost, callSid, 'callee'),
+      timeout: 30,
+      statusCallback: `${serverUrl}/call/status`,
+      statusCallbackEvent: ['completed'],
+    });
+    const session = sessionStore.get(callSid);
+    if (session) session.calleeSid = out.sid;
+    console.log(`[CALL] Dialing target, CallSid: ${out.sid}`);
+  } catch (err) {
+    console.error(`[CALL] Could not dial target: ${err.message}`);
+  }
 }
 
 export function handleCallAnswered(req, res) { res.sendStatus(200); }
 
-export function handleCallStatus(req, res) {
-  const { CallSid, DialCallStatus } = req.body;
-  console.log(`[CALL] Status update for ${CallSid}: ${DialCallStatus}`);
-  const session = sessionStore.get(CallSid);
-  if (session) { session.status = DialCallStatus; sessionStore.set(CallSid, session); }
-  const twiml = new twilio.twiml.VoiceResponse();
-  twiml.hangup();
-  res.type('text/xml').send(twiml.toString());
+// Fires when the callee leg ends (unanswered/busy/hung up): end the caller leg too.
+export async function handleCallStatus(req, res) {
+  const { CallSid, CallStatus } = req.body;
+  console.log(`[CALL] Status ${CallSid}: ${CallStatus}`);
+  for (const s of sessionStore.values()) {
+    if (s.calleeSid === CallSid && ['completed', 'busy', 'no-answer', 'failed', 'canceled'].includes(CallStatus)) {
+      s.status = CallStatus;
+      try { await client().calls(s.callSid).update({ status: 'completed' }); } catch {}
+    }
+  }
+  res.sendStatus(200);
 }

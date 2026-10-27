@@ -6,13 +6,12 @@ function getClient() {
   return _client;
 }
 
-export async function injectAudioIntoCall(callSid, audioUrl) {
-  const twiml = `<Response><Play>${audioUrl}</Play></Response>`;
+export async function hangupCall(callSid) {
   try {
-    await getClient().calls(callSid).update({ twiml });
-    console.log(`[TWILIO] Injected audio into call ${callSid}`);
+    await getClient().calls(callSid).update({ status: 'completed' });
+    console.log(`[TWILIO] Hung up ${callSid}`);
   } catch (err) {
-    console.error(`[TWILIO] Failed to inject audio: ${err.message}`);
+    if (err.status !== 404) console.error(`[TWILIO] Hangup failed for ${callSid}: ${err.message}`);
   }
 }
 

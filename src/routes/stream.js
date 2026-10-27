@@ -1,160 +1,99 @@
-import { transcribeAudio } from '../services/whisper.js';
-import { translateText } from '../services/translate.js';
-import { synthesizeSpeech } from '../services/elevenlabs.js';
+import { createTranslator } from '../services/realtimeTranslator.js';
 import { sessionStore } from '../services/sessionStore.js';
-import { injectAudioIntoCall } from '../services/twilioClient.js';
+import { hangupCall } from '../services/twilioClient.js';
 
-function isSpeech(chunk) {
-  let energy = 0;
-  for (let i = 0; i < chunk.length; i++) {
-    energy += Math.abs(chunk[i] - 0xFF);
+/**
+ * Each call (caller leg A, callee leg B) opens its own bidirectional Twilio stream.
+ * pairs[pairId] = { caller: leg, callee: leg }, leg = { ws, streamSid, callSid, queue }
+ * A's speech -> translator A->B -> played to B; B's speech -> translator B->A -> played to A.
+ */
+const pairs = new Map();
+
+function sendToLeg(leg, payload) {
+  if (leg?.ws?.readyState === 1 && leg.streamSid) {
+    leg.ws.send(JSON.stringify({ event: 'media', streamSid: leg.streamSid, media: { payload } }));
+  } else if (leg) {
+    leg.queue.push(payload);
   }
-  return (energy / chunk.length) > 2;
 }
 
-export function handleMediaStream(ws, req) {
-  let callSid = null;
-  let audioBuffer = Buffer.alloc(0);
-  let streamSid = null;
-  let keepAliveInterval = null;
-  let processingInterval = null;
-  let totalChunks = 0;
-  let speechChunks = 0;
+function addTranscript(pairId, speaker, kind, text) {
+  const session = sessionStore.get(pairId);
+  if (!session) return;
+  session.transcript.push({ timestamp: new Date().toISOString(), speaker, kind, text });
+}
 
-  const SAMPLE_RATE = 8000;
-  const BYTES_PER_MS = SAMPLE_RATE / 1000;
-  const MIN_AUDIO_MS = 500;
-  const PROCESS_EVERY_MS = 5000;
+export function handleMediaStream(ws) {
+  let pairId = null;
+  let role = null;
+  let translator = null;
 
-  keepAliveInterval = setInterval(() => {
-    if (ws.readyState === ws.OPEN) ws.ping();
-  }, 5000);
-
-  processingInterval = setInterval(async () => {
-    if (audioBuffer.length === 0) return;
-    const capturedBuffer = audioBuffer;
-    audioBuffer = Buffer.alloc(0);
-    const durationMs = capturedBuffer.length / BYTES_PER_MS;
-    if (durationMs < MIN_AUDIO_MS) return;
-    console.log(`[STREAM] Flushing ${Math.round(durationMs)}ms of speech for processing`);
-    await processUtterance(capturedBuffer, callSid, streamSid);
-  }, PROCESS_EVERY_MS);
-
-  ws.on('message', async (data) => {
+  ws.on('message', (data) => {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
 
     switch (msg.event) {
-      case 'connected':
-        console.log('[STREAM] Connected');
-        break;
+      case 'start': {
+        const params = msg.start.customParameters || {};
+        pairId = params.pairId;
+        role = params.role; // 'caller' | 'callee'
+        const session = sessionStore.get(pairId);
+        const callerLang = session?.callerLang || process.env.CALLER_LANG || 'en';
+        const targetLang = session?.targetLang || process.env.TARGET_LANG || 'de';
 
-      case 'start':
-        streamSid = msg.start.streamSid;
-        callSid = msg.start.customParameters?.callSid || null;
-        console.log(`[STREAM] Started — CallSid: ${callSid}`);
-        break;
+        if (!pairs.has(pairId)) pairs.set(pairId, {});
+        const pair = pairs.get(pairId);
+        const leg = { ws, streamSid: msg.start.streamSid, callSid: msg.start.callSid, queue: [] };
+        // keep audio that arrived for this leg before it connected
+        const earlier = pair[role];
+        if (earlier?.queue?.length) leg.queue = earlier.queue;
+        pair[role] = leg;
+        for (const p of leg.queue.splice(0)) sendToLeg(leg, p);
 
-      case 'media': {
-        if (msg.media.track !== 'inbound') break;
-        totalChunks++;
-        const chunk = Buffer.from(msg.media.payload, 'base64');
-        if (isSpeech(chunk)) {
-          speechChunks++;
-          audioBuffer = Buffer.concat([audioBuffer, chunk]);
-        }
+        const otherRole = role === 'caller' ? 'callee' : 'caller';
+        const [from, to] = role === 'caller' ? [callerLang, targetLang] : [targetLang, callerLang];
+
+        translator = createTranslator({
+          from, to, label: role,
+          onAudio: (payload) => {
+            const p = pairs.get(pairId);
+            if (!p) return;
+            if (!p[otherRole]) p[otherRole] = { queue: [] };
+            sendToLeg(p[otherRole], payload);
+          },
+          onTranscript: (kind, text) => addTranscript(pairId, role, kind, text),
+        });
+        console.log(`[STREAM] ${role} started — pair ${pairId}, call ${leg.callSid}`);
         break;
       }
 
+      case 'media':
+        if (translator && msg.media?.payload) translator.sendAudio(msg.media.payload);
+        break;
+
       case 'stop':
-        console.log(`[STREAM] Stopped — total: ${totalChunks}, speech: ${speechChunks}`);
-        clearInterval(processingInterval);
-        if (audioBuffer.length > 0) {
-          const capturedBuffer = audioBuffer;
-          audioBuffer = Buffer.alloc(0);
-          const durationMs = capturedBuffer.length / BYTES_PER_MS;
-          if (durationMs >= MIN_AUDIO_MS) {
-            console.log(`[STREAM] Final flush: ${Math.round(durationMs)}ms`);
-            await processUtterance(capturedBuffer, callSid, streamSid);
-          }
-        }
+        console.log(`[STREAM] ${role} stopped — pair ${pairId}`);
+        cleanup();
         break;
     }
   });
 
-  ws.on('close', (code) => {
-    console.log(`[STREAM] WebSocket closed — code: ${code}`);
-    clearInterval(keepAliveInterval);
-    clearInterval(processingInterval);
-  });
+  ws.on('close', cleanup);
+  ws.on('error', (err) => console.error('[STREAM] ws error:', err.message));
 
-  ws.on('error', (err) => {
-    console.error('[STREAM] WebSocket error:', err.message);
-    clearInterval(keepAliveInterval);
-    clearInterval(processingInterval);
-  });
-}
-
-async function processUtterance(mulawBuffer, callSid, streamSid) {
-  const session = callSid ? sessionStore.get(callSid) : null;
-  const callerLang = session?.callerLang || 'en';
-  const targetLang = session?.targetLang || 'de';
-
-  // Step 1: Transcribe
-  let originalText;
-  try {
-    console.log('[PIPELINE] Transcribing...');
-    originalText = await transcribeAudio(mulawBuffer, callerLang);
-    if (!originalText || originalText.trim().length < 2) {
-      console.log('[PIPELINE] Empty transcription, skipping');
-      return;
-    }
-    console.log(`[PIPELINE] Transcribed: "${originalText}"`);
-  } catch (err) {
-    console.error('[PIPELINE] Transcription failed:', err.message);
-    return;
-  }
-
-  // Step 2: Translate
-  let translatedText;
-  try {
-    console.log('[PIPELINE] Translating...');
-    translatedText = await translateText(originalText, callerLang, targetLang);
-    console.log(`[PIPELINE] Translated: "${translatedText}"`);
-  } catch (err) {
-    console.error('[PIPELINE] Translation failed:', err.message);
-    return;
-  }
-
-  // Step 3: TTS
-  let audioUrl;
-  try {
-    console.log('[PIPELINE] Synthesizing speech...');
-    audioUrl = await synthesizeSpeech(translatedText, targetLang);
-    console.log(`[PIPELINE] Audio ready: ${audioUrl}`);
-  } catch (err) {
-    console.error('[PIPELINE] TTS failed:', err.message);
-    return;
-  }
-
-  // Step 4: Inject into call
-  try {
-    if (callSid && audioUrl) {
-      await injectAudioIntoCall(callSid, audioUrl);
-    }
-  } catch (err) {
-    console.error('[PIPELINE] Inject failed:', err.message);
-  }
-
-  // Step 5: Save transcript
-  if (session) {
-    session.transcript.push({
-      timestamp: new Date().toISOString(),
-      speaker: 'caller',
-      original: originalText,
-      translated: translatedText,
-      lang: { from: callerLang, to: targetLang },
-    });
-    sessionStore.set(callSid, session);
+  let cleaned = false;
+  function cleanup() {
+    if (cleaned) return;
+    cleaned = true;
+    translator?.close();
+    const pair = pairs.get(pairId);
+    if (!pair) return;
+    // one side hung up -> end the other side too
+    const otherRole = role === 'caller' ? 'callee' : 'caller';
+    const other = pair[otherRole];
+    if (other?.callSid) hangupCall(other.callSid);
+    const session = sessionStore.get(pairId);
+    if (session) session.status = 'completed';
+    pairs.delete(pairId);
   }
 }
