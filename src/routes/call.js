@@ -39,11 +39,11 @@ function askNumber(res) {
   const { serverUrl } = urls();
   const twiml = new VoiceResponse();
   const g = twiml.gather({
-    finishOnKey: '#', timeout: 10, numDigits: 16,
+    finishOnKey: '#', timeout: 4, numDigits: 16, // submits 4 s after the last digit; '#' alone = default
     action: `${serverUrl}/call/menu/number`, method: 'POST',
   });
-  g.say(SAY, 'Enter the phone number with country code, for example 4 3 for Austria, then press the hash key.'
-    + (process.env.DEFAULT_TARGET_NUMBER ? ' To call the default number, just press hash.' : ''));
+  g.say(SAY, 'Enter the phone number with country code, for example 4 3 for Austria.'
+    + (process.env.DEFAULT_TARGET_NUMBER ? ' To call the default number, press hash.' : ''));
   twiml.redirect({ method: 'POST' }, `${serverUrl}/call/menu/askNumber`);
   res.type('text/xml').send(twiml.toString());
 }
