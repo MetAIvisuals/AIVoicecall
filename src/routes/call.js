@@ -4,7 +4,7 @@ import { client } from '../services/twilioClient.js';
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// Keypad menu: digit -> language (all are output languages of gpt-realtime-translate)
+// Keypad menu: digit -> language of the person being called (caller language is detected automatically)
 const MENU = { 1: 'en', 2: 'de', 3: 'fr', 4: 'es', 5: 'it', 6: 'pt', 7: 'ru', 8: 'zh', 9: 'ja' };
 const MENU_TEXT = '1 English. 2 German. 3 French. 4 Spanish. 5 Italian. 6 Portuguese. 7 Russian. 8 Chinese. 9 Japanese.';
 const SAY = { voice: 'Polly.Joanna', language: 'en-US' };
@@ -71,7 +71,7 @@ export function handleInboundCall(req, res) {
     status: 'menu', startedAt: new Date().toISOString(),
     callerLang: null, targetLang: null, transcript: [],
   });
-  askLanguage(res, 'source', 'Welcome to the call translator. Which language do you speak?');
+  askLanguage(res, 'target', 'Welcome to the call translator. You can speak any language. Which language does the person you are calling speak?');
 }
 
 // Step 1 + 2: choose own language, then target language
