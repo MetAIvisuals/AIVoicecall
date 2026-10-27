@@ -3,17 +3,21 @@ import WebSocket from 'ws';
 /**
  * Streaming speech-to-text for one phone leg (OpenAI Realtime transcription session).
  * Input: base64 8 kHz mulaw straight from Twilio. Server VAD cuts utterances.
- * onUtterance(text) fires once per finished utterance.
+ * A known `language` is passed to the model — without it short utterances get
+ * mis-detected (laughter came back as Korean) and accuracy drops noticeably.
+ * onUtterance(text, language) fires once per finished utterance.
  */
-export function createTranscriber({ label, onUtterance, onSpeechStart }) {
+export function createTranscriber({ label, language, onUtterance, onSpeechStart, onSpeechStopped }) {
   const model = process.env.TRANSCRIBE_MODEL || 'gpt-4o-transcribe';
   const silenceMs = Number(process.env.VAD_SILENCE_MS || 500);
+  const threshold = Number(process.env.VAD_THRESHOLD || 0.6);
   const ws = new WebSocket('wss://api.openai.com/v1/realtime?intent=transcription', {
     headers: { Authorization: `Bearer ${(process.env.OPENAI_API_KEY || '').trim()}` },
   });
 
   let ready = false;
   let triedBeta = false;
+  let lang = language || null;
   const pending = [];
 
   function sendGa() {
@@ -24,9 +28,9 @@ export function createTranscriber({ label, onUtterance, onSpeechStart }) {
         audio: {
           input: {
             format: { type: 'audio/pcmu' },
-            transcription: { model },
+            transcription: { model, ...(lang ? { language: lang } : {}) },
             noise_reduction: { type: 'near_field' },
-            turn_detection: { type: 'server_vad', threshold: 0.6, prefix_padding_ms: 300, silence_duration_ms: silenceMs },
+            turn_detection: { type: 'server_vad', threshold, prefix_padding_ms: 300, silence_duration_ms: silenceMs },
           },
         },
       },
@@ -38,18 +42,20 @@ export function createTranscriber({ label, onUtterance, onSpeechStart }) {
       type: 'transcription_session.update',
       session: {
         input_audio_format: 'g711_ulaw',
-        input_audio_transcription: { model },
+        input_audio_transcription: { model, ...(lang ? { language: lang } : {}) },
         input_audio_noise_reduction: { type: 'near_field' },
-        turn_detection: { type: 'server_vad', threshold: 0.6, prefix_padding_ms: 300, silence_duration_ms: silenceMs },
+        turn_detection: { type: 'server_vad', threshold, prefix_padding_ms: 300, silence_duration_ms: silenceMs },
       },
     }));
   }
+
+  const update = () => (triedBeta ? sendBeta() : sendGa());
 
   ws.on('open', () => {
     sendGa();
     ready = true;
     for (const p of pending.splice(0)) ws.send(p);
-    console.log(`[STT ${label}] connected (${model})`);
+    console.log(`[STT ${label}] connected (${model}${lang ? `, ${lang}` : ', auto'})`);
   });
 
   ws.on('message', (raw) => {
@@ -59,9 +65,12 @@ export function createTranscriber({ label, onUtterance, onSpeechStart }) {
       case 'input_audio_buffer.speech_started':
         onSpeechStart?.();
         break;
+      case 'input_audio_buffer.speech_stopped':
+        onSpeechStopped?.();
+        break;
       case 'conversation.item.input_audio_transcription.completed': {
         const text = (ev.transcript || '').trim();
-        if (text) onUtterance(text);
+        if (text) onUtterance(text, (ev.language || lang || '').toLowerCase().slice(0, 2) || null);
         break;
       }
       case 'error':
@@ -80,6 +89,12 @@ export function createTranscriber({ label, onUtterance, onSpeechStart }) {
       const msg = JSON.stringify({ type: 'input_audio_buffer.append', audio: base64Mulaw });
       if (ready && ws.readyState === WebSocket.OPEN) ws.send(msg);
       else if (pending.length < 500) pending.push(msg);
+    },
+    // once we know what this person speaks, pin the model to it
+    setLanguage(code) {
+      if (!code || code === lang) return;
+      lang = code;
+      if (ready && ws.readyState === WebSocket.OPEN) { update(); console.log(`[STT ${label}] language -> ${lang}`); }
     },
     close() { try { ws.close(); } catch {} },
   };

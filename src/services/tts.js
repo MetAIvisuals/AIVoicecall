@@ -11,7 +11,14 @@ export async function speak(text, onPcm) {
       model: process.env.TTS_MODEL || 'gpt-4o-mini-tts',
       voice: process.env.TTS_VOICE || 'coral',
       input: text,
-      instructions: 'Calm, clear, friendly phone interpreter. Natural pace.',
+      instructions: process.env.TTS_INSTRUCTIONS || [
+        'You are interpreting a live phone call between two people.',
+        'Speak like a real person talking on the phone: warm, relaxed and conversational,',
+        'with natural rhythm, natural intonation and small variations in pace.',
+        'Do not sound like an announcer, a news reader or an assistant, and do not over-enunciate.',
+        'Match the mood of what is being said, but stay even and easy to understand.',
+        'Say only the words given. Never read punctuation, emoji or descriptions out loud.',
+      ].join(' '),
       response_format: 'pcm', // 24 kHz 16-bit mono
     }),
   });

@@ -1,5 +1,5 @@
 import { createTranscriber } from '../services/transcriber.js';
-import { interpret } from '../services/interpreter.js';
+import { interpret, isSpeakable, KNOWN_LANGS } from '../services/interpreter.js';
 import { speak } from '../services/tts.js';
 import { MULAW_DECODE, mulawEncode, rms } from '../services/audio.js';
 import { sessionStore } from '../services/sessionStore.js';
@@ -17,13 +17,14 @@ const pairs = new Map();
 const GATE_RMS = Number(process.env.NOISE_GATE_RMS || 250);   // quieter frames are sent to STT as silence
 const GATE_HOLD_MS = 600;
 const MAX_BACKLOG_MS = Number(process.env.MAX_BACKLOG_MS || 4000);
-// while the AI voice plays into a leg it echoes back on that leg's mic; mute STT until it has died away
-const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS || 700);
+// while the AI voice plays into a leg it can echo back on that leg's mic; keep the tail short
+// so speech that starts right after the translation is not swallowed
+const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS || 200);
 const SILENT_RMS = 150;
 const SILENT_FRAME = Buffer.alloc(160, 0xff).toString('base64');
 
 function newLeg() {
-  return { ws: null, streamSid: null, callSid: null, out: [], outLen: 0, gateOpenUntil: 0, echoHoldUntil: 0, chain: Promise.resolve(), context: [] };
+  return { ws: null, streamSid: null, callSid: null, out: [], outLen: 0, gateOpenUntil: 0, echoHoldUntil: 0, speechStoppedAt: 0, chain: Promise.resolve() };
 }
 
 function enqueue(leg, pcm) {
@@ -70,31 +71,65 @@ export function handleMediaStream(ws) {
     return session?.callerLang || process.env.CALLER_LANG || 'en'; // detected from the caller's speech
   }
 
-  function handleUtterance(text) {
+  // the caller's language is detected from their speech; a single odd detection must not flip it
+  function noteCallerLang(session, lang) {
+    if (role !== 'caller' || !session || !lang || !KNOWN_LANGS.has(lang) || session.callerLang === lang) return;
+    if (!session.callerLang || session.langCandidate === lang) {
+      session.callerLang = lang;
+      session.langCandidate = null;
+      console.log(`[LANG] caller speaks ${lang}`);
+      stt?.setLanguage(lang); // pin this leg's STT to it
+    } else {
+      session.langCandidate = lang; // needs a second utterance to confirm
+    }
+  }
+
+  function handleUtterance(text, sttLang) {
     const pair = pairs.get(pairId);
     if (!pair) return;
     const me = pair[role];
     const heardAt = Date.now();
+    const sttMs = me.speechStoppedAt ? heardAt - me.speechStoppedAt : null;
+
+    // laughter, filler and noise must never be spoken — the TTS would read them out literally
+    if (!isSpeakable(text)) {
+      console.log(`[${role}] skipped (not speech): "${text}"`);
+      return;
+    }
+
     // one utterance at a time per speaker, so the order is kept
     me.chain = me.chain.then(async () => {
       const session = sessionStore.get(pairId);
       const target = targetLangFor(session);
+      const myLang = role === 'caller' ? (sttLang || session?.callerLang) : (session?.targetLang || sttLang);
       try {
-        const { lang, text: out } = await interpret(text, target, me.context.slice(-4));
-        if (role === 'caller' && lang && session && session.callerLang !== lang) {
-          session.callerLang = lang;
-          console.log(`[LANG] caller speaks ${lang}`);
+        let lang = myLang || '';
+        let out = text;
+        let itpMs = 0;
+        // same language on both sides: no translation needed, so skip the LLM entirely —
+        // saves a round trip and removes any chance of it inventing a sentence
+        if (!myLang || myLang !== target) {
+          const t0 = Date.now();
+          const r = await interpret(text, target);
+          itpMs = Date.now() - t0;
+          lang = r.lang || myLang || '';
+          out = r.text;
         }
+        noteCallerLang(session, lang);
         console.log(`[${role}] (${lang}) "${text}" -> (${target}) "${out}"`);
         addTranscript(pairId, role, 'original', text);
         addTranscript(pairId, role, 'translated', out);
-        me.context.push(text);
-        if (!out) return;
+        if (!isSpeakable(out)) return;
         const other = pairs.get(pairId)?.[otherRole];
         if (!other) return;
+        const t1 = Date.now();
         let first = true;
         await speak(out, (pcm) => {
-          if (first) { first = false; console.log(`[LAT ${role}] ${Date.now() - heardAt} ms end of speech -> AI voice`); }
+          if (first) {
+            first = false;
+            const parts = [sttMs === null ? null : `stt ${sttMs}`, itpMs ? `itp ${itpMs}` : 'itp skipped', `tts ${Date.now() - t1}`];
+            console.log(`[LAT ${role}] ${parts.filter(Boolean).join(' + ')} = ${Date.now() - (me.speechStoppedAt || heardAt)} ms`);
+          }
           enqueue(other, pcm);
         });
       } catch (err) {
@@ -114,8 +149,17 @@ export function handleMediaStream(ws) {
         role = params.role; // 'caller' | 'callee'
         otherRole = role === 'caller' ? 'callee' : 'caller';
         if (!pairs.has(pairId)) pairs.set(pairId, { caller: newLeg(), callee: newLeg() });
-        Object.assign(pairs.get(pairId)[role], { ws, streamSid: msg.start.streamSid, callSid: msg.start.callSid });
-        stt = createTranscriber({ label: role, onUtterance: handleUtterance });
+        const leg = pairs.get(pairId)[role];
+        Object.assign(leg, { ws, streamSid: msg.start.streamSid, callSid: msg.start.callSid });
+        const session = sessionStore.get(pairId);
+        // the callee's language comes from the menu; the caller's is detected, so start on auto
+        const known = role === 'callee' ? session?.targetLang : session?.callerLang;
+        stt = createTranscriber({
+          label: role,
+          language: known && KNOWN_LANGS.has(known) ? known : null,
+          onUtterance: handleUtterance,
+          onSpeechStopped: () => { leg.speechStoppedAt = Date.now(); },
+        });
         console.log(`[STREAM] ${role} started — pair ${pairId}`);
         break;
       }
