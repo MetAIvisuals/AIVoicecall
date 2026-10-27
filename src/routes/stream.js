@@ -9,7 +9,18 @@ import { hangupCall } from '../services/twilioClient.js';
  */
 const pairs = new Map();
 
+// Echo guard: while a leg is playing translated audio, its own microphone is muted
+// (otherwise the speaker output - or a phone lying next to it - gets translated again).
+const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS || 400);
+const SILENCE = Buffer.alloc(160, 0xff).toString('base64');
+
+function markPlayback(leg, payload) {
+  const ms = Buffer.from(payload, 'base64').length / 8; // 8 bytes per ms (8 kHz mulaw)
+  leg.playUntil = Math.max(Date.now(), leg.playUntil || 0) + ms;
+}
+
 function sendToLeg(leg, payload) {
+  if (leg) markPlayback(leg, payload);
   if (leg?.ws?.readyState === 1 && leg.streamSid) {
     leg.ws.send(JSON.stringify({ event: 'media', streamSid: leg.streamSid, media: { payload } }));
   } else if (leg) {
@@ -67,9 +78,13 @@ export function handleMediaStream(ws) {
         break;
       }
 
-      case 'media':
-        if (translator && msg.media?.payload) translator.sendAudio(msg.media.payload);
+      case 'media': {
+        if (!translator || !msg.media?.payload) break;
+        const me = pairs.get(pairId)?.[role];
+        const muted = me?.playUntil && Date.now() < me.playUntil + ECHO_TAIL_MS;
+        translator.sendAudio(muted ? SILENCE : msg.media.payload);
         break;
+      }
 
       case 'stop':
         console.log(`[STREAM] ${role} stopped — pair ${pairId}`);
