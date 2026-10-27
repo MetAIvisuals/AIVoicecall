@@ -8,7 +8,7 @@ export const LANGUAGES = {
 };
 
 // ---------- audio conversion: Twilio 8 kHz mulaw <-> OpenAI 24 kHz PCM16 ----------
-const MULAW_DECODE = new Int16Array(256);
+export const MULAW_DECODE = new Int16Array(256);
 for (let i = 0; i < 256; i++) {
   const u = ~i & 0xff;
   const sign = u & 0x80;
@@ -18,7 +18,7 @@ for (let i = 0; i < 256; i++) {
   MULAW_DECODE[i] = sign ? -sample : sample;
 }
 
-function mulawEncode(sample) {
+export function mulawEncode(sample) {
   const BIAS = 0x84, CLIP = 32635;
   const sign = sample < 0 ? 0x80 : 0;
   if (sign) sample = -sample;
@@ -51,10 +51,9 @@ function makeDownsampler() {
   return (pcm24) => {
     const buf = rest.length ? Buffer.concat([rest, pcm24]) : pcm24;
     const frames = Math.floor(buf.length / 6);
-    const out = Buffer.alloc(frames);
+    const out = new Int16Array(frames);
     for (let i = 0; i < frames; i++) {
-      const s = (buf.readInt16LE(i * 6) + buf.readInt16LE(i * 6 + 2) + buf.readInt16LE(i * 6 + 4)) / 3;
-      out[i] = mulawEncode(Math.round(s));
+      out[i] = Math.round((buf.readInt16LE(i * 6) + buf.readInt16LE(i * 6 + 2) + buf.readInt16LE(i * 6 + 4)) / 3);
     }
     rest = buf.subarray(frames * 6);
     return out;
@@ -63,7 +62,7 @@ function makeDownsampler() {
 
 /**
  * One gpt-realtime-translate session = one direction (one speaker -> one target language).
- * sendAudio(): base64 mulaw from Twilio. onAudio(): base64 mulaw for Twilio.
+ * sendAudio(): base64 mulaw from Twilio. onAudio(): Int16Array of 8 kHz PCM samples.
  */
 export function createTranslator({ to, label, onAudio, onTranscript }) {
   const model = process.env.OPENAI_TRANSLATE_MODEL || 'gpt-realtime-translate';
@@ -110,8 +109,8 @@ export function createTranslator({ to, label, onAudio, onTranscript }) {
     switch (ev.type) {
       case 'session.output_audio.delta': {
         if (!ev.delta) break;
-        const mulaw = down(Buffer.from(ev.delta, 'base64'));
-        if (mulaw.length) onAudio(mulaw.toString('base64'));
+        const pcm8 = down(Buffer.from(ev.delta, 'base64'));
+        if (pcm8.length) onAudio(pcm8);
         break;
       }
       case 'session.input_transcript.delta':
