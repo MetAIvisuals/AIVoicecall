@@ -12,6 +12,18 @@
 - Realtime noch nicht mit echtem Anruf getestet. Risiko laut Doku-Erfahrung: Speech-to-Speech antwortet gern statt zu übersetzen -> die Instructions in `realtime.js` verbieten das ausdrücklich und verlangen auch bei gleicher Sprache Nachsprechen statt Stille.
 - Anrufer-Sprache: im Realtime-Pfad aus dem Input-Transkript (`detectLanguage`, abseits des kritischen Pfads), danach `setTargetLang` auf das andere Leg.
 
+### Realtime-Pfad: am Prüfstand geklärt, nicht geraten
+Erster echter Anruf mit `REALTIME=1` erfand Antworten (`"pique"` -> `"Alright, I'm ready. Let's go."`). Ein Prüfstand speist synthetische Sprache als mulaw 8 kHz in eine echte Session, also ohne Telefon: `scratchpad/rt-translate-test.mjs` (läuft mit `railway run --service AIVoicecall node ...`, Varianten `baseline|prod|frag|fragHard|cleanHard|gated`).
+
+Ergebnisse:
+- Mit **sauberem** Audio übersetzt `gpt-realtime` korrekt, auch Fragen ("Is somebody speaking?" -> "Spricht da jemand?") und den Gleich-Sprache-Fall. Die Instructions waren also nie das Problem, und server VAD auch nicht.
+- Mit **einem unklaren Wort** erfindet es einen ganzen Satz: `"pique"` -> gehört `"Peak"` -> `"Also, ich bin jetzt auf dem Gipfel."` Genau der Produktionsfehler, reproduziert.
+- Die Fragmente kamen aus unserer eigenen Echo-Sperre: während jeder Wiedergabe wurde dem Modell Stille untergeschoben, also wurden Sätze zu `"No, I'm"`, `"Licht"`, `"pique"`.
+- Zusatz in den Instructions ("unsicher ist normal, dann schweigen, nie etwas Plausibles einsetzen") stoppt die Erfindung (`"pique"` -> `"Spitze."`) und lässt saubere Sätze unverändert korrekt.
+- `create_response: false` + `response.create` erst **nach** geprüftem Transkript funktioniert ohne Desync (ein früherer Versuch hing einen Turn zurück, weil die Response vor dem Commit kam).
+
+Daraus der jetzige Aufbau: server VAD schneidet die Turns, antwortet aber nicht selbst. Erst wenn das Transkript da ist und Echo-/Müll-Prüfung passiert hat, wird `response.create` geschickt. Deshalb braucht das Mikrofon keine Stummschaltung mehr - die Fragment-Quelle ist weg.
+
 ### Fixes an der bestehenden Kette (Teil 5)
 - Erfundene Sätze abgestellt: der Interpreter-Prompt durfte "obvious transcription errors" korrigieren und bekam 4 Sätze Kontext -> aus `"Ich ka säm Stupid."` wurde `"Ich kann's nicht glauben, wie dumm ich bin."`. Jetzt strikt wörtlich, kein Kontext, leerer Text bei Unverständlichem.
 - STT bekam keinen Sprach-Hinweis -> Lachen wurde als Koreanisch erkannt, die Anrufer-Sprache flatterte. Jetzt pro Leg auf die bekannte Sprache fixiert, Sprachwechsel braucht zwei Sätze.

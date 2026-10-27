@@ -132,17 +132,21 @@ export function handleMediaStream(ws) {
         }
         enqueueMulaw(other, mulaw);
       },
+      onSpeechStopped: () => { leg.speechStoppedAt = Date.now(); firstAudioAt = 0; },
+      // Nothing is spoken until the text has been seen. The model answers only when we ask it
+      // to, so echo and junk are dropped before any audio exists — which is why the mic no
+      // longer has to be muted during playback, and speech is no longer cut into fragments.
       onInputTranscript: (text, lang) => {
-        firstAudioAt = 0;
-        leg.speechStoppedAt = Date.now(); // transcript arrives about when the turn ends
         if (!text) return;
         if (isEcho(leg, text)) return console.log(`[${role}] skipped (our own voice echoed back): "${text}"`);
+        if (!isSpeakable(text)) return console.log(`[${role}] skipped (not speech): "${text}"`);
         console.log(`[${role}] heard "${text}"`);
         addTranscript(pairId, role, 'original', text);
+        rt.respond();
         if (role !== 'caller') return;
         const s = sessionStore.get(pairId);
         if (lang) return noteCallerLang(s, lang);
-        if (s?.callerLang || !isSpeakable(text)) return;
+        if (s?.callerLang) return;
         // no language on the event: ask separately, off the critical path
         detectLanguage(text).then((l) => noteCallerLang(sessionStore.get(pairId), l)).catch(() => {});
       },
@@ -254,10 +258,9 @@ export function handleMediaStream(ws) {
         const mulaw = Buffer.from(msg.media.payload, 'base64');
 
         if (rt) {
-          // the model's own VAD and noise reduction handle the audio; only our own
-          // voice echoing back has to be kept out, or it would be re-voiced in a loop
-          const silent = Date.now() <= me.echoHoldUntil;
-          rt.sendAudio(silent ? (mulaw.length === 160 ? SILENT_FRAME : Buffer.alloc(mulaw.length, 0xff).toString('base64')) : msg.media.payload);
+          // passed through untouched: the model's VAD and noise reduction do the work, and the
+          // echo of our own voice is caught on the transcript instead of by muting the mic
+          rt.sendAudio(msg.media.payload);
           pump(me, mulaw.length);
           break;
         }

@@ -10,7 +10,7 @@ import { langName } from './interpreter.js';
  *
  * onAudio(Buffer of 8 kHz mulaw) fires as the translated speech arrives.
  */
-export function createRealtime({ label, targetLang, onAudio, onInputTranscript, onOutputTranscript }) {
+export function createRealtime({ label, targetLang, onAudio, onInputTranscript, onOutputTranscript, onSpeechStopped }) {
   const model = process.env.REALTIME_MODEL || 'gpt-realtime';
   const voice = process.env.TTS_VOICE || 'coral';
   const silenceMs = Number(process.env.VAD_SILENCE_MS || 500);
@@ -24,6 +24,7 @@ export function createRealtime({ label, targetLang, onAudio, onInputTranscript, 
   let ready = false;
   let triedBeta = false;
   let target = targetLang;
+  let turnWatchdog = null;
   const pending = [];
 
   // The two failure modes of a speech-to-speech interpreter are answering instead of
@@ -38,6 +39,12 @@ export function createRealtime({ label, targetLang, onAudio, onInputTranscript, 
       'Never add words the speaker did not say, and never complete, correct or guess at a fragment. Say only what is there.',
       'Speak the way people speak on the phone: warm, relaxed, natural rhythm. Do not read punctuation out loud.',
       'If you hear only noise, laughter or filler, stay silent.',
+      // Without this it fills an unclear word with a whole plausible sentence: a test fed it one
+      // muffled word and got back "Also, ich bin jetzt auf dem Gipfel." Spelling out that silence
+      // is an acceptable answer stops that and leaves clean sentences untouched.
+      'You only ever hear part of a noisy phone line, so being unsure is normal and expected.',
+      'If you did not clearly catch what was said, if you only caught a fragment or a single unclear word, or if it would be a guess, say nothing at all. Silence is always the right answer then.',
+      'Never fill a gap with something plausible. Never turn a fragment into a whole sentence. Saying nothing is far better than saying something that was not said.',
     ].join(' ');
   }
 
@@ -53,7 +60,9 @@ export function createRealtime({ label, targetLang, onAudio, onInputTranscript, 
             format: { type: 'audio/pcmu' }, // mulaw 8 kHz, fixed rate — sending `rate` is rejected
             transcription: { model: transcribeModel },
             noise_reduction: { type: 'near_field' },
-            turn_detection: { type: 'server_vad', threshold, prefix_padding_ms: 300, silence_duration_ms: silenceMs },
+            // VAD cuts the turns, but it must not answer by itself: the response is created
+            // once the transcript has been checked for echo and junk
+            turn_detection: { type: 'server_vad', threshold, prefix_padding_ms: 300, silence_duration_ms: silenceMs, create_response: false },
           },
           output: { format: { type: 'audio/pcmu' }, voice },
         },
@@ -71,7 +80,7 @@ export function createRealtime({ label, targetLang, onAudio, onInputTranscript, 
         input_audio_format: 'g711_ulaw',
         output_audio_format: 'g711_ulaw',
         input_audio_transcription: { model: transcribeModel },
-        turn_detection: { type: 'server_vad', threshold, prefix_padding_ms: 300, silence_duration_ms: silenceMs },
+        turn_detection: { type: 'server_vad', threshold, prefix_padding_ms: 300, silence_duration_ms: silenceMs, create_response: false },
       },
     }));
   }
@@ -89,12 +98,19 @@ export function createRealtime({ label, targetLang, onAudio, onInputTranscript, 
     let ev;
     try { ev = JSON.parse(raw); } catch { return; }
     switch (ev.type) {
+      case 'input_audio_buffer.speech_stopped':
+        onSpeechStopped?.();
+        // nothing is spoken without a transcript, so a missing one would silence the call
+        clearTimeout(turnWatchdog);
+        turnWatchdog = setTimeout(() => console.error(`[RT ${label}] a finished turn produced no transcript — nothing was said`), 5000);
+        break;
       // GA and beta spell the audio delta differently; accept both
       case 'response.output_audio.delta':
       case 'response.audio.delta':
         if (ev.delta) onAudio(Buffer.from(ev.delta, 'base64'));
         break;
       case 'conversation.item.input_audio_transcription.completed':
+        clearTimeout(turnWatchdog);
         onInputTranscript?.((ev.transcript || '').trim(), (ev.language || '').toLowerCase().slice(0, 2) || null);
         break;
       case 'response.output_audio_transcript.done':
@@ -118,12 +134,16 @@ export function createRealtime({ label, targetLang, onAudio, onInputTranscript, 
       if (ready && ws.readyState === WebSocket.OPEN) ws.send(msg);
       else if (pending.length < 500) pending.push(msg);
     },
+    // say the turn that was just committed — called only once its transcript passed the checks
+    respond() {
+      if (ready && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'response.create' }));
+    },
     // the caller's language is only known once they have spoken, so the other leg retargets
     setTargetLang(code) {
       if (!code || code === target) return;
       target = code;
       if (ready && ws.readyState === WebSocket.OPEN) { update(); console.log(`[RT ${label}] target -> ${target}`); }
     },
-    close() { try { ws.close(); } catch {} },
+    close() { clearTimeout(turnWatchdog); try { ws.close(); } catch {} },
   };
 }
