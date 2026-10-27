@@ -17,11 +17,13 @@ const pairs = new Map();
 const GATE_RMS = Number(process.env.NOISE_GATE_RMS || 250);   // quieter frames are sent to STT as silence
 const GATE_HOLD_MS = 600;
 const MAX_BACKLOG_MS = Number(process.env.MAX_BACKLOG_MS || 4000);
+// while the AI voice plays into a leg it echoes back on that leg's mic; mute STT until it has died away
+const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS || 700);
 const SILENT_RMS = 150;
 const SILENT_FRAME = Buffer.alloc(160, 0xff).toString('base64');
 
 function newLeg() {
-  return { ws: null, streamSid: null, callSid: null, out: [], outLen: 0, gateOpenUntil: 0, chain: Promise.resolve(), context: [] };
+  return { ws: null, streamSid: null, callSid: null, out: [], outLen: 0, gateOpenUntil: 0, echoHoldUntil: 0, chain: Promise.resolve(), context: [] };
 }
 
 function enqueue(leg, pcm) {
@@ -49,6 +51,7 @@ function pump(leg, n) {
     leg.outLen -= k;
   }
   leg.ws.send(JSON.stringify({ event: 'media', streamSid: leg.streamSid, media: { payload: frame.toString('base64') } }));
+  leg.echoHoldUntil = Date.now() + ECHO_TAIL_MS;
 }
 
 function addTranscript(pairId, speaker, kind, text) {
@@ -125,10 +128,13 @@ export function handleMediaStream(ws) {
         const samples = new Int16Array(mulaw.length);
         for (let i = 0; i < mulaw.length; i++) samples[i] = MULAW_DECODE[mulaw[i]];
 
-        // noise gate: line noise goes to STT as silence (prevents invented sentences)
+        // echo suppression: our own AI voice comes back on this leg's mic, so mute STT while it plays
         const now = Date.now();
-        if (rms(samples) >= GATE_RMS) me.gateOpenUntil = now + GATE_HOLD_MS;
-        stt.sendAudio(now <= me.gateOpenUntil ? msg.media.payload : (mulaw.length === 160 ? SILENT_FRAME : Buffer.alloc(mulaw.length, 0xff).toString('base64')));
+        const echoing = now <= me.echoHoldUntil;
+        // noise gate: line noise goes to STT as silence (prevents invented sentences)
+        if (!echoing && rms(samples) >= GATE_RMS) me.gateOpenUntil = now + GATE_HOLD_MS;
+        const open = !echoing && now <= me.gateOpenUntil;
+        stt.sendAudio(open ? msg.media.payload : (mulaw.length === 160 ? SILENT_FRAME : Buffer.alloc(mulaw.length, 0xff).toString('base64')));
 
         pump(me, mulaw.length); // this leg's clock drives playback of the AI voice meant for it
         break;
