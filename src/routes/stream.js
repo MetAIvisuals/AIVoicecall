@@ -1,5 +1,6 @@
 import { createTranscriber } from '../services/transcriber.js';
 import { createRealtime } from '../services/realtime.js';
+import { createGemini } from '../services/gemini.js';
 import { interpret, isSpeakable, detectLanguage, KNOWN_LANGS } from '../services/interpreter.js';
 import { speak } from '../services/tts.js';
 import { MULAW_DECODE, mulawEncode, rms } from '../services/audio.js';
@@ -47,10 +48,18 @@ const SILENT_RMS = 150;
 const SILENT_FRAME = Buffer.alloc(160, 0xff).toString('base64');
 // REALTIME=1 switches to one speech-to-speech session per leg instead of STT -> LLM -> TTS
 const USE_REALTIME = /^(1|true|yes|on)$/i.test(process.env.REALTIME || '');
+// TRANSLATOR=gemini: simultaneous translation in the speaker's own voice, no waiting for the end of a sentence
+const USE_GEMINI = (process.env.TRANSLATOR || '').toLowerCase() === 'gemini';
 
 function newLeg() {
-  return { ws: null, streamSid: null, callSid: null, rt: null, spoken: [], out: [], outLen: 0, gateOpenUntil: 0, echoHoldUntil: 0, speechStoppedAt: 0, chain: Promise.resolve() };
+  return { ws: null, streamSid: null, callSid: null, rt: null, spoken: [], out: [], outLen: 0, gateOpenUntil: 0, echoHoldUntil: 0, speechStoppedAt: 0, speechStartedAt: 0, chain: Promise.resolve() };
 }
+
+const decodeMulaw = (mulaw) => {
+  const out = new Int16Array(mulaw.length);
+  for (let i = 0; i < mulaw.length; i++) out[i] = MULAW_DECODE[mulaw[i]];
+  return out;
+};
 
 // The queue holds mulaw bytes, ready to hand to Twilio: the Realtime API delivers them that
 // way already, and converting the TTS path here keeps the 20 ms pump free of per-sample work.
@@ -99,6 +108,7 @@ export function handleMediaStream(ws) {
   let otherRole = null;
   let stt = null;
   let rt = null;
+  let gem = null;
 
   function targetLangFor(session) {
     if (role === 'caller') return session?.targetLang || process.env.TARGET_LANG || 'de';
@@ -167,6 +177,47 @@ export function handleMediaStream(ws) {
       },
     });
     leg.rt = rt;
+  }
+
+  // Simultaneous path: audio streams through, translated audio streams back. Transcripts arrive
+  // in pieces, so they are joined per burst for the log and for detecting the caller's language.
+  function startGemini(leg, session) {
+    let heard = '';
+    let said = '';
+    let flushTimer = null;
+    const flush = () => {
+      const text = heard.trim();
+      if (said.trim()) {
+        noteSpoken(pairs.get(pairId) || {}, said);
+        console.log(`[${role}] -> "${said.trim()}"`);
+        addTranscript(pairId, role, 'translated', said.trim());
+      }
+      heard = '';
+      said = '';
+      if (!text) return;
+      console.log(`[${role}] heard "${text}"`);
+      addTranscript(pairId, role, 'original', text);
+      if (role !== 'caller' || !isSpeakable(text)) return;
+      detectLanguage(text).then((l) => noteCallerLang(sessionStore.get(pairId), l)).catch(() => {});
+    };
+    const later = () => { clearTimeout(flushTimer); flushTimer = setTimeout(flush, 1200); };
+    gem = createGemini({
+      label: role,
+      targetLang: targetLangFor(session),
+      onAudio: (mulaw) => {
+        const other = pairs.get(pairId)?.[otherRole];
+        if (!other) return;
+        if (leg.speechStartedAt) {
+          const ms = Date.now() - leg.speechStartedAt;
+          if (ms < 10000) console.log(`[LAT ${role}] AI voice ${ms} ms after start of speech`);
+          leg.speechStartedAt = 0;
+        }
+        enqueueMulaw(other, mulaw);
+      },
+      onInputTranscript: (t) => { heard += t; later(); },
+      onOutputTranscript: (t) => { said += t; later(); },
+    });
+    leg.rt = gem; // so the other leg can retarget it once the caller's language is known
   }
 
   function handleUtterance(text, sttLang) {
@@ -245,7 +296,9 @@ export function handleMediaStream(ws) {
         const session = sessionStore.get(pairId);
         // the callee's language comes from the menu; the caller's is detected, so start on auto
         const known = role === 'callee' ? session?.targetLang : session?.callerLang;
-        if (USE_REALTIME) {
+        if (USE_GEMINI) {
+          startGemini(leg, session);
+        } else if (USE_REALTIME) {
           startRealtime(leg, session);
         } else {
           stt = createTranscriber({
@@ -265,6 +318,15 @@ export function handleMediaStream(ws) {
         if (!me) break;
         const mulaw = Buffer.from(msg.media.payload, 'base64');
 
+        if (gem) {
+          // The model translates as audio arrives, so there is no transcript to check before it
+          // speaks: our own voice coming back on this mic has to be kept out while it plays.
+          const playing = Date.now() <= me.echoHoldUntil;
+          gem.sendAudio(playing ? (mulaw.length === 160 ? SILENT_FRAME : Buffer.alloc(mulaw.length, 0xff).toString('base64')) : msg.media.payload);
+          if (!playing && !me.speechStartedAt && rms(decodeMulaw(mulaw)) >= GATE_RMS) me.speechStartedAt = Date.now();
+          pump(me, mulaw.length);
+          break;
+        }
         if (rt) {
           // passed through untouched: the model's VAD and noise reduction do the work, and the
           // echo of our own voice is caught on the transcript instead of by muting the mic
@@ -304,6 +366,7 @@ export function handleMediaStream(ws) {
     cleaned = true;
     stt?.close();
     rt?.close();
+    gem?.close();
     const pair = pairs.get(pairId);
     if (!pair) return;
     const other = pair[otherRole];

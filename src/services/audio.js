@@ -41,3 +41,18 @@ export function makeDownsampler24to8() {
     return out;
   };
 }
+
+// 8 kHz mulaw (bytes) -> 16 kHz PCM16 little-endian bytes (linear interpolation, streaming)
+export function makeUpsampler8to16() {
+  let last = 0;
+  return (mulaw) => {
+    const out = Buffer.alloc(mulaw.length * 4);
+    for (let i = 0; i < mulaw.length; i++) {
+      const s = MULAW_DECODE[mulaw[i]];
+      out.writeInt16LE((last + s) >> 1, i * 4);
+      out.writeInt16LE(s, i * 4 + 2);
+      last = s;
+    }
+    return out;
+  };
+}

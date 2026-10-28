@@ -3,6 +3,24 @@
 **Branch:** `claude/aivoicecall-cloud-setup-1d36yj` (Railway deployt diesen Branch)
 **Railway-URL:** https://aivoicecall-production-696b.up.railway.app
 
+## Stand (28.10., Teil 6) - Gemini Live Translate
+
+### Dritter Pfad: `TRANSLATOR=gemini` (hat Vorrang vor `REALTIME`)
+- Modell `gemini-3.5-live-translate-preview` (Google, Preview seit Juni 2026, `GEMINI_MODEL` überschreibbar). **Simultan**: übersetzt während gesprochen wird, wartet nicht aufs Satzende - genau der strukturelle Engpass der OpenAI-Pfade (~1,1 s Serverboden + VAD-Stille nach Satzende).
+- Stimme = nachgeahmte Stimme des Sprechers, keine feste KI-Stimme (vom Nutzer so akzeptiert). Keine Instructions möglich.
+- Gleiche Sprache: `echoTargetLanguage: true` -> spricht nach statt zu schweigen.
+- `src/services/gemini.js`: mulaw 8 kHz -> PCM 16 kHz (100-ms-Chunks) rein, PCM 24 kHz -> mulaw 8 kHz raus. Zielsprache steckt im Setup -> `setTargetLang` öffnet eine neue Session. `goAway`/Abbruch -> automatisch neu verbinden.
+- Setup-Form gegen die echte API geprüft (nur mit Dummy-Key): `translationConfig` gehört in `generationConfig`; oben in `setup` wird es abgelehnt.
+- Echo: das Modell spricht, bevor wir Text sehen, also gibt es keine Textprüfung vorab. Deshalb wird das Mikro während der Wiedergabe + `ECHO_TAIL_MS` stummgeschaltet (Risiko: abgeschnittene Satzanfänge, beobachten).
+- Anrufer-Sprache: aus dem gesammelten Input-Transkript per `detectLanguage`, danach neue Session für die Gegenseite.
+- Log: `[LAT caller] AI voice ... ms after start of speech` (Bezug ist hier der Sprech-**Beginn**).
+
+### Offen
+- **`GEMINI_API_KEY` fehlt in Railway** (aistudio.google.com -> API key). Erst dann:
+  1. Prüfstand ohne Telefon: `railway run --service AIVoicecall node tools/gemini-bench.mjs de`
+  2. Echter Anruf mit `TRANSLATOR=gemini`.
+- Noch nichts davon mit echtem Audio getestet.
+
 ## Stand (27.10., Teil 5)
 
 ### Zwei Pfade, per Env umschaltbar
