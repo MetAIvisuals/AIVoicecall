@@ -13,7 +13,10 @@ import { langName } from './interpreter.js';
 export function createRealtime({ label, targetLang, onAudio, onInputTranscript, onOutputTranscript, onSpeechStopped }) {
   const model = process.env.REALTIME_MODEL || 'gpt-realtime';
   const voice = process.env.TTS_VOICE || 'coral';
-  const silenceMs = Number(process.env.VAD_SILENCE_MS || 500);
+  // Measured end of speech -> first AI audio: 500 ms -> ~1.65 s, 350 ms -> ~1.47 s, 200 ms -> ~1.36 s.
+// About 1.1 s of that is the server's own transcription and generation, so this wait is the only
+// part we control. Lower cuts people off at natural pauses, so 350 is the compromise.
+const silenceMs = Number(process.env.VAD_SILENCE_MS || 350);
   const threshold = Number(process.env.VAD_THRESHOLD || 0.6);
   const transcribeModel = process.env.TRANSCRIBE_MODEL || 'gpt-4o-transcribe';
 

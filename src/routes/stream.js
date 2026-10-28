@@ -124,6 +124,7 @@ export function handleMediaStream(ws) {
   // so this side only forwards audio and hands the result to the other leg.
   function startRealtime(leg, session) {
     let firstAudioAt = 0;
+    let transcriptAt = 0;
     rt = createRealtime({
       label: role,
       targetLang: targetLangFor(session),
@@ -132,15 +133,19 @@ export function handleMediaStream(ws) {
         if (!other) return;
         if (!firstAudioAt) {
           firstAudioAt = Date.now();
-          if (leg.speechStoppedAt) console.log(`[LAT ${role}] ${firstAudioAt - leg.speechStoppedAt} ms end of speech -> AI voice`);
+          if (leg.speechStoppedAt) {
+            const toText = transcriptAt ? `text ${transcriptAt - leg.speechStoppedAt} ms, ` : '';
+            console.log(`[LAT ${role}] ${toText}AI voice ${firstAudioAt - leg.speechStoppedAt} ms after end of speech`);
+          }
         }
         enqueueMulaw(other, mulaw);
       },
-      onSpeechStopped: () => { leg.speechStoppedAt = Date.now(); firstAudioAt = 0; },
+      onSpeechStopped: () => { leg.speechStoppedAt = Date.now(); firstAudioAt = 0; transcriptAt = 0; },
       // Nothing is spoken until the text has been seen. The model answers only when we ask it
       // to, so echo and junk are dropped before any audio exists — which is why the mic no
       // longer has to be muted during playback, and speech is no longer cut into fragments.
       onInputTranscript: (text, lang) => {
+        transcriptAt = Date.now();
         if (!text) return;
         if (isEcho(leg, text)) return console.log(`[${role}] skipped (our own voice echoed back): "${text}"`);
         if (!isSpeakable(text)) return console.log(`[${role}] skipped (not speech): "${text}"`);

@@ -24,6 +24,14 @@ Ergebnisse:
 
 Daraus der jetzige Aufbau: server VAD schneidet die Turns, antwortet aber nicht selbst. Erst wenn das Transkript da ist und Echo-/Müll-Prüfung passiert hat, wird `response.create` geschickt. Deshalb braucht das Mikrofon keine Stummschaltung mehr - die Fragment-Quelle ist weg.
 
+### Latenz: gemessen, nicht geschätzt (Prüfstand, Variante `gated`)
+Erstes Audio nach Sprech-Ende, je VAD-Stille: **500 ms -> ~1,65 s, 350 ms -> ~1,47 s, 200 ms -> ~1,36 s.**
+- Rund **1,1 s sind serverseitiger Boden** (Transkription + Generierung von `gpt-realtime`), nicht beeinflussbar.
+- Die VAD-Stille ist der einzige Hebel, den wir haben. Standard jetzt 350 ms (`VAD_SILENCE_MS`). Tiefer geht, schneidet aber bei natürlichen Pausen mitten im Satz ab.
+- **Verworfen:** Antwort schon bei `input_audio_buffer.committed` anfordern und das Audio bis zur Textprüfung zurückhalten, um die Transkriptzeit zu parallelisieren. Gemessen: kein Unterschied (~1,37-1,40 s in beiden Varianten) - der Server beginnt die Generierung ohnehin erst, wenn das Item verarbeitet ist. Wurde deshalb wieder entfernt statt als Komplexität behalten.
+- Achtung bei eigenen Messungen: die Werte schwanken zwischen Läufen deutlich (dieselbe Variante einmal ~1,37 s, einmal ~1,65 s). Nur Trends über mehrere Läufe sind belastbar.
+- Was bleibt, ist strukturell: konsekutiv übersetzt wird erst nach Satzende. Sich natürlich anfühlendes Dazwischenreden bräuchte simultane Übersetzung auf Teil-Transkripten - anderer Aufbau, deutliches Qualitätsrisiko.
+
 ### Fixes an der bestehenden Kette (Teil 5)
 - Erfundene Sätze abgestellt: der Interpreter-Prompt durfte "obvious transcription errors" korrigieren und bekam 4 Sätze Kontext -> aus `"Ich ka säm Stupid."` wurde `"Ich kann's nicht glauben, wie dumm ich bin."`. Jetzt strikt wörtlich, kein Kontext, leerer Text bei Unverständlichem.
 - STT bekam keinen Sprach-Hinweis -> Lachen wurde als Koreanisch erkannt, die Anrufer-Sprache flatterte. Jetzt pro Leg auf die bekannte Sprache fixiert, Sprachwechsel braucht zwei Sätze.
