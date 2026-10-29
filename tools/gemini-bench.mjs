@@ -2,7 +2,7 @@
 // at real-time pace, exactly as Twilio delivers it, and the timings come out.
 //   railway run --service AIVoicecall node tools/gemini-bench.mjs [targetLang]
 import { createGemini } from '../src/services/gemini.js';
-import { makeDownsampler24to8, mulawEncode } from '../src/services/audio.js';
+import { makeDownsampler24to8, mulawEncode, MULAW_DECODE, rms } from '../src/services/audio.js';
 
 const target = process.argv[2] || 'de';
 const SENTENCES = [
@@ -30,10 +30,13 @@ const gem = createGemini({
   targetLang: target,
   onAudio: (buf) => {
     if (!turn) return;
+    turn.bytes += buf.length;
+    // the model streams silence as audio too, so only audible chunks count
+    if (rms(Int16Array.from(buf, (b) => MULAW_DECODE[b])) < 150) return;
     const now = Date.now();
     if (!turn.first) turn.first = now;
     turn.last = now;
-    turn.bytes += buf.length;
+    turn.voiced += buf.length;
   },
   onInputTranscript: (t) => { if (turn) turn.heard += t; },
   onOutputTranscript: (t) => { if (turn) turn.said += t; },
@@ -43,7 +46,7 @@ const SILENCE = Buffer.alloc(160, 0xff).toString('base64');
 await sleep(3000); // let the session set up
 for (const text of SENTENCES) {
   const mulaw = await tts(text);
-  turn = { start: Date.now(), first: 0, last: 0, bytes: 0, heard: '', said: '' };
+  turn = { start: Date.now(), first: 0, last: 0, bytes: 0, voiced: 0, heard: '', said: '' };
   for (let i = 0; i < mulaw.length; i += 160) {
     gem.sendAudio(mulaw.subarray(i, i + 160).toString('base64'));
     await sleep(20);
@@ -53,9 +56,9 @@ for (const text of SENTENCES) {
   const t = turn;
   console.log(`\n"${text}" (${end - t.start} ms of speech)`);
   console.log(`  heard: "${t.heard.trim()}"`);
-  console.log(`  said:  "${t.said.trim()}" (${(t.bytes / 8000).toFixed(1)} s of audio)`);
+  console.log(`  said:  "${t.said.trim()}" (${(t.voiced / 8000).toFixed(1)} s audible of ${(t.bytes / 8000).toFixed(1)} s received)`);
   console.log(t.first
-    ? `  first AI audio ${t.first - t.start} ms after start of speech (${t.first - end} ms relative to its end), last ${t.last - end} ms after end`
+    ? `  first AI voice ${t.first - t.start} ms after start of speech, AI voice ends ${t.last - end} ms after the speaker stopped`
     : '  no audio came back');
 }
 gem.close();

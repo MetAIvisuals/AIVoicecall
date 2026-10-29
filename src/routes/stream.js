@@ -207,12 +207,15 @@ export function handleMediaStream(ws) {
       onAudio: (mulaw) => {
         const other = pairs.get(pairId)?.[otherRole];
         if (!other) return;
-        if (leg.speechStartedAt) {
+        // the model streams its pauses as audio too; marked silent, they are the first to go
+        // when playback falls behind, and they do not count as the AI voice starting
+        const silent = rms(decodeMulaw(mulaw)) < SILENT_RMS;
+        if (!silent && leg.speechStartedAt) {
           const ms = Date.now() - leg.speechStartedAt;
           if (ms < 10000) console.log(`[LAT ${role}] AI voice ${ms} ms after start of speech`);
           leg.speechStartedAt = 0;
         }
-        enqueueMulaw(other, mulaw);
+        enqueueMulaw(other, mulaw, silent);
       },
       onInputTranscript: (t) => { heard += t; later(); },
       onOutputTranscript: (t) => { said += t; later(); },

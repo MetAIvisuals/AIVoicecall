@@ -15,11 +15,16 @@
 - Anrufer-Sprache: aus dem gesammelten Input-Transkript per `detectLanguage`, danach neue Session für die Gegenseite.
 - Log: `[LAT caller] AI voice ... ms after start of speech` (Bezug ist hier der Sprech-**Beginn**).
 
+### Prüfstand (`railway run --service AIVoicecall node tools/gemini-bench.mjs de`), 2 Läufe
+- Übersetzung korrekt, auch Frage und Gleich-Sprache-Fall (Deutsch -> Deutsch wird nachgesprochen).
+- Das Modell streamt auch Pausen als Audio (Stille, in Echtzeit). Gemessen wird deshalb nur hörbares Audio; im Live-Pfad wird Stille als `silent` markiert (Backlog darf sie verwerfen) und zählt nicht für `[LAT]`.
+- Kurze Sätze (~2 s): erste KI-Stimme **~1,2-2 s nach Sprech-Ende** - etwa wie `gpt-realtime` (~1,4 s).
+- Lange Sätze (~4 s): KI-Stimme beginnt **~2,2-2,6 s nach Sprech-Beginn, also noch während gesprochen wird**.
+- KI-Stimme ist **~2-3,7 s nach Sprech-Ende fertig**, unabhängig von der Satzlänge. Bei `gpt-realtime` kommt die ganze Dauer der Übersetzung noch obendrauf -> Gemini gewinnt vor allem bei langen Sätzen.
+- Schwankt zwischen Läufen (Lauf 1 deutlich langsamer als Lauf 2).
+
 ### Offen
-- **`GEMINI_API_KEY` fehlt in Railway** (aistudio.google.com -> API key). Erst dann:
-  1. Prüfstand ohne Telefon: `railway run --service AIVoicecall node tools/gemini-bench.mjs de`
-  2. Echter Anruf mit `TRANSLATOR=gemini`.
-- Noch nichts davon mit echtem Audio getestet.
+- Echter Anruf mit `TRANSLATOR=gemini` (Echo-Stummschaltung beobachten: abgeschnittene Satzanfänge?).
 
 ## Stand (27.10., Teil 5)
 
