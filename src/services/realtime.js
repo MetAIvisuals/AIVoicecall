@@ -10,7 +10,7 @@ import { langName } from './interpreter.js';
  *
  * onAudio(Buffer of 8 kHz mulaw) fires as the translated speech arrives.
  */
-export function createRealtime({ label, targetLang, onAudio, onInputTranscript, onOutputTranscript, onSpeechStopped }) {
+export function createRealtime({ label, targetLang, language, onAudio, onInputTranscript, onOutputTranscript, onSpeechStopped }) {
   const model = process.env.REALTIME_MODEL || 'gpt-realtime';
   const voice = process.env.TTS_VOICE || 'coral';
   // Measured end of speech -> first AI audio: 500 ms -> ~1.65 s, 350 ms -> ~1.47 s, 200 ms -> ~1.36 s.
@@ -27,6 +27,9 @@ const silenceMs = Number(process.env.VAD_SILENCE_MS || 350);
   let ready = false;
   let triedBeta = false;
   let target = targetLang;
+  // Unpinned, the transcriber hears our own voice echoing back as Korean or Japanese gibberish,
+  // which the text echo check cannot match, so the model re-voices the echo as a new sentence.
+  let lang = language || null;
   let turnWatchdog = null;
   const pending = [];
 
@@ -63,7 +66,7 @@ const silenceMs = Number(process.env.VAD_SILENCE_MS || 350);
         audio: {
           input: {
             format: { type: 'audio/pcmu' }, // mulaw 8 kHz, fixed rate — sending `rate` is rejected
-            transcription: { model: transcribeModel },
+            transcription: { model: transcribeModel, ...(lang ? { language: lang } : {}) },
             noise_reduction: { type: 'near_field' },
             // VAD cuts the turns, but it must not answer by itself: the response is created
             // once the transcript has been checked for echo and junk
@@ -84,7 +87,7 @@ const silenceMs = Number(process.env.VAD_SILENCE_MS || 350);
         voice,
         input_audio_format: 'g711_ulaw',
         output_audio_format: 'g711_ulaw',
-        input_audio_transcription: { model: transcribeModel },
+        input_audio_transcription: { model: transcribeModel, ...(lang ? { language: lang } : {}) },
         turn_detection: { type: 'server_vad', threshold, prefix_padding_ms: 300, silence_duration_ms: silenceMs, create_response: false },
       },
     }));
@@ -148,6 +151,12 @@ const silenceMs = Number(process.env.VAD_SILENCE_MS || 350);
       if (!code || code === target) return;
       target = code;
       if (ready && ws.readyState === WebSocket.OPEN) { update(); console.log(`[RT ${label}] target -> ${target}`); }
+    },
+    // pin the transcript to the language this leg speaks, once it is known
+    setLanguage(code) {
+      if (!code || code === lang) return;
+      lang = code;
+      if (ready && ws.readyState === WebSocket.OPEN) update();
     },
     close() { clearTimeout(turnWatchdog); try { ws.close(); } catch {} },
   };

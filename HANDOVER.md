@@ -3,6 +3,13 @@
 **Branch:** `claude/aivoicecall-cloud-setup-1d36yj` (Railway deployt diesen Branch)
 **Railway-URL:** https://aivoicecall-production-696b.up.railway.app
 
+## Stand (30.10., Teil 8) - erfundene Antworten im Realtime-Pfad = Echo-Schleife
+
+- Anruf mit `gpt-realtime` (beide Seiten Deutsch): Anrufer-Leg transkribierte Müll ("잘못했어요", "Ma oniwa", "いや", "Harajspiele stärken"). Das war die KI-Stimme bzw. das andere Telefon im Raum, zurück im Mikro.
+- Weil das Transkript Müll war, griff die Text-Echo-Erkennung nicht; das Modell hört aber das Audio und sprach das Echo als neuen Satz nach ("Hallo, ich bin der Steffen" -> "Hallo, hier ist der Stefan, guten Morgen"). Das sind die "KI-Antworten".
+- Fix: Transkription im Realtime-Pfad pro Leg auf die bekannte Sprache fixiert (`language` / `setLanguage`, wie in der alten Kette). Angerufener sofort (Menü), Anrufer nach Erkennung. Prüfstand: API akzeptiert es; das unklare Einzelwort ergibt jetzt leeren Text -> Stille.
+- Testhinweis: beide Telefone in getrennten Räumen, und für echte Tests zwei verschiedene Sprachen. Deutsch<->Deutsch heisst nur Nachsprechen, und das Modell paraphrasiert dabei gern leicht ("Wort." -> "Im Wort.").
+
 ## Stand (30.10., Teil 7) - Modellvergleich, Ergebnis: bei gpt-realtime bleiben
 
 ### Gemini Live Translate im echten Anruf: verworfen

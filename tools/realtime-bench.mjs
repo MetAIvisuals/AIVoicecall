@@ -27,6 +27,7 @@ let turn = null;
 const rt = createRealtime({
   label: 'bench',
   targetLang: 'de',
+  language: process.env.BENCH_LANG || null, // the language the bench sentences are in
   onAudio: (buf) => {
     if (!turn || turn.first || rms(Int16Array.from(buf, (b) => MULAW_DECODE[b])) < 150) return;
     turn.first = Date.now();

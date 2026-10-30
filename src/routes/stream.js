@@ -127,6 +127,7 @@ export function handleMediaStream(ws) {
       session.langCandidate = null;
       console.log(`[LANG] caller speaks ${lang}`);
       stt?.setLanguage(lang); // pin this leg's STT to it
+      rt?.setLanguage(lang);
       // the other leg translates into the caller's language, so point it there
       pairs.get(pairId)?.[otherRole]?.rt?.setTargetLang(lang);
     } else {
@@ -139,9 +140,11 @@ export function handleMediaStream(ws) {
   function startRealtime(leg, session) {
     let firstAudioAt = 0;
     let transcriptAt = 0;
+    const known = role === 'callee' ? session?.targetLang : session?.callerLang;
     rt = createRealtime({
       label: role,
       targetLang: targetLangFor(session),
+      language: known && KNOWN_LANGS.has(known) ? known : null,
       onAudio: (mulaw) => {
         const other = pairs.get(pairId)?.[otherRole];
         if (!other) return;
