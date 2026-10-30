@@ -1,5 +1,5 @@
 // railway run --service AIVoicecall -- env TRANSLATOR=gemini node tools/sim-call.mjs
-// Two fake Twilio legs through the real stream handler: caller speaks English, callee is silent.
+// Two fake Twilio legs with line noise through the real stream handler: callee says "Hallo?", then the caller speaks English.
 import { EventEmitter } from 'events';
 const R = new URL('../src', import.meta.url).href;
 const { handleMediaStream } = await import(`${R}/routes/stream.js`);
