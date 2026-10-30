@@ -85,8 +85,10 @@ function pump(leg, n) {
   if (!leg.outLen || leg.ws?.readyState !== 1 || !leg.streamSid) return;
   const frame = Buffer.alloc(n, 0xff);
   let filled = 0;
+  let audible = false;
   while (filled < n && leg.out.length) {
     const c = leg.out[0];
+    if (!c.silent) audible = true;
     const k = Math.min(n - filled, c.buf.length);
     c.buf.copy(frame, filled, 0, k);
     filled += k;
@@ -94,7 +96,9 @@ function pump(leg, n) {
     leg.outLen -= k;
   }
   leg.ws.send(JSON.stringify({ event: 'media', streamSid: leg.streamSid, media: { payload: frame.toString('base64') } }));
-  leg.echoHoldUntil = Date.now() + ECHO_TAIL_MS;
+  // only an audible AI voice can echo back; Gemini streams its silence too, and counting that
+  // kept both mics muted for the whole call
+  if (audible) leg.echoHoldUntil = Date.now() + ECHO_TAIL_MS;
 }
 
 function addTranscript(pairId, speaker, kind, text) {

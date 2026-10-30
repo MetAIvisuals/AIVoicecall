@@ -23,6 +23,11 @@
 - KI-Stimme ist **~2-3,7 s nach Sprech-Ende fertig**, unabhängig von der Satzlänge. Bei `gpt-realtime` kommt die ganze Dauer der Übersetzung noch obendrauf -> Gemini gewinnt vor allem bei langen Sätzen.
 - Schwankt zwischen Läufen (Lauf 1 deutlich langsamer als Lauf 2).
 
+### Erster echter Anruf: gar kein Ton
+- Ursache: Gemini streamt auch Stille als Audio, sobald gesprochen wurde (bei Leitungsrauschen dauerhaft). `pump` hat jede Wiedergabe als "KI spricht" gewertet -> Echo-Sperre hielt das Mikro der Gegenseite für immer stumm.
+- Fix: Echo-Sperre nur bei hörbarem Audio (`silent`-Flag der Queue-Chunks).
+- `tools/sim-call.mjs` simuliert einen ganzen Anruf durch `stream.js` (zwei Fake-Twilio-Legs, Leitungsrauschen, Angerufener sagt zuerst "Hallo?"). Alt: Anrufer kommt nie durch, neu: beide Richtungen.
+
 ### Offen
 - Echter Anruf mit `TRANSLATOR=gemini` (Echo-Stummschaltung beobachten: abgeschnittene Satzanfänge?).
 
