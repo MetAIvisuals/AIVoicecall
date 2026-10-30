@@ -58,6 +58,8 @@ const silenceMs = Number(process.env.VAD_SILENCE_MS || 350);
         type: 'realtime',
         output_modalities: ['audio'],
         instructions: instructions(),
+        // reasoning models (gpt-realtime-2) think before speaking; the lowest effort is the fastest
+        ...(process.env.REALTIME_REASONING ? { reasoning: { effort: process.env.REALTIME_REASONING } } : {}),
         audio: {
           input: {
             format: { type: 'audio/pcmu' }, // mulaw 8 kHz, fixed rate — sending `rate` is rejected

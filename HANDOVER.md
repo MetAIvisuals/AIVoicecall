@@ -3,6 +3,21 @@
 **Branch:** `claude/aivoicecall-cloud-setup-1d36yj` (Railway deployt diesen Branch)
 **Railway-URL:** https://aivoicecall-production-696b.up.railway.app
 
+## Stand (30.10., Teil 7) - Modellvergleich, Ergebnis: bei gpt-realtime bleiben
+
+### Gemini Live Translate im echten Anruf: verworfen
+- Lag 3-9 s nach Sprech-Beginn (Google: "ein paar Sekunden hinter dem Sprecher", also so gebaut). Prüfstand zeigte ~3 s, echt deutlich mehr.
+- Deutsch teils als Thai erkannt -> erfundene Sätze. Keine Instructions möglich, also nicht abstellbar.
+- Code bleibt (`TRANSLATOR=gemini`), Railway-Variable `TRANSLATOR` soll gelöscht sein -> `REALTIME=1`-Pfad.
+
+### gpt-realtime vs. gpt-realtime-2 (`tools/realtime-bench.mjs`, gleiche Logik wie im Anruf: Antwort erst nach geprüftem Transkript)
+Erstes hörbares KI-Audio nach Sprech-Ende (je 1 Lauf, Satz 1 ausgelassen: VAD schnitt nach "Hello," ab):
+- `gpt-realtime`: **1,31-1,53 s**
+- `gpt-realtime-2` (Standard-Reasoning): 1,07-1,81 s, Mittel langsamer
+- `gpt-realtime-2` + `REALTIME_REASONING=minimal`: 1,85-1,98 s (Parameter `reasoning.effort` wird akzeptiert, macht es aber nicht schneller)
+- Übersetzungsqualität bei allen gleich gut. Einzelwort "pique" -> ein Wort ("Wiederholen."/"Sprich."), kein ganzer erfundener Satz mehr.
+- Fazit: kein neueres Modell ist schneller. ~1,3-1,5 s nach Satzende ist der Boden für konsekutives Übersetzen mit heutigen APIs; davon ~0,4 s VAD, ~0,5 s Transkript, ~0,5 s bis zum ersten Ton.
+
 ## Stand (28.10., Teil 6) - Gemini Live Translate
 
 ### Dritter Pfad: `TRANSLATOR=gemini` (hat Vorrang vor `REALTIME`)
