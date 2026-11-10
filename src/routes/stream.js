@@ -2,6 +2,7 @@ import { createTranscriber } from '../services/transcriber.js';
 import { createRealtime } from '../services/realtime.js';
 import { createGemini } from '../services/gemini.js';
 import { interpret, isSpeakable, detectLanguage, KNOWN_LANGS } from '../services/interpreter.js';
+import { shouldLockLang } from '../services/langLock.js';
 import { speak } from '../services/tts.js';
 import { MULAW_DECODE, mulawEncode, rms } from '../services/audio.js';
 import { sessionStore } from '../services/sessionStore.js';
@@ -119,20 +120,17 @@ export function handleMediaStream(ws) {
     return session?.callerLang || process.env.CALLER_LANG || 'en'; // detected from the caller's speech
   }
 
-  // the caller's language is detected from their speech; a single odd detection must not flip it
-  function noteCallerLang(session, lang) {
-    if (role !== 'caller' || !session || !lang || !KNOWN_LANGS.has(lang) || session.callerLang === lang) return;
-    if (!session.callerLang || session.langCandidate === lang) {
-      session.callerLang = lang;
-      session.langCandidate = null;
-      console.log(`[LANG] caller speaks ${lang}`);
-      stt?.setLanguage(lang); // pin this leg's STT to it
-      rt?.setLanguage(lang);
-      // the other leg translates into the caller's language, so point it there
-      pairs.get(pairId)?.[otherRole]?.rt?.setTargetLang(lang);
-    } else {
-      session.langCandidate = lang; // needs a second utterance to confirm
-    }
+  // the caller's language is detected from their speech; one short or garbled utterance must never
+  // set or flip it (see langLock.js: consistent detections over enough text are required)
+  function noteCallerLang(session, lang, text) {
+    if (role !== 'caller' || !session || !lang || !KNOWN_LANGS.has(lang)) return;
+    if (!shouldLockLang(session, lang, text)) return;
+    session.callerLang = lang;
+    console.log(`[LANG] caller speaks ${lang}`);
+    stt?.setLanguage(lang); // pin this leg's STT to it
+    rt?.setLanguage(lang);
+    // the other leg translates into the caller's language, so point it there
+    pairs.get(pairId)?.[otherRole]?.rt?.setTargetLang(lang);
   }
 
   // Speech-to-speech path: the model does transcribe, translate and speak in one session,
@@ -171,10 +169,10 @@ export function handleMediaStream(ws) {
         rt.respond();
         if (role !== 'caller') return;
         const s = sessionStore.get(pairId);
-        if (lang) return noteCallerLang(s, lang);
+        if (lang) return noteCallerLang(s, lang, text);
         if (s?.callerLang) return;
         // no language on the event: ask separately, off the critical path
-        detectLanguage(text).then((l) => noteCallerLang(sessionStore.get(pairId), l)).catch(() => {});
+        detectLanguage(text).then((l) => noteCallerLang(sessionStore.get(pairId), l, text)).catch(() => {});
       },
       onOutputTranscript: (text) => {
         if (!text) return;
@@ -205,7 +203,7 @@ export function handleMediaStream(ws) {
       console.log(`[${role}] heard "${text}"`);
       addTranscript(pairId, role, 'original', text);
       if (role !== 'caller' || !isSpeakable(text)) return;
-      detectLanguage(text).then((l) => noteCallerLang(sessionStore.get(pairId), l)).catch(() => {});
+      detectLanguage(text).then((l) => noteCallerLang(sessionStore.get(pairId), l, text)).catch(() => {});
     };
     const later = () => { clearTimeout(flushTimer); flushTimer = setTimeout(flush, 1200); };
     gem = createGemini({
@@ -266,7 +264,7 @@ export function handleMediaStream(ws) {
           lang = r.lang || myLang || '';
           out = r.text;
         }
-        noteCallerLang(session, lang);
+        noteCallerLang(session, lang, text);
         console.log(`[${role}] (${lang}) "${text}" -> (${target}) "${out}"`);
         addTranscript(pairId, role, 'original', text);
         addTranscript(pairId, role, 'translated', out);

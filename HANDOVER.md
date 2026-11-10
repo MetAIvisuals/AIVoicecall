@@ -25,6 +25,12 @@ Erstes hörbares KI-Audio nach Sprech-Ende (je 1 Lauf, Satz 1 ausgelassen: VAD s
 - Übersetzungsqualität bei allen gleich gut. Einzelwort "pique" -> ein Wort ("Wiederholen."/"Sprich."), kein ganzer erfundener Satz mehr.
 - Fazit: kein neueres Modell ist schneller. ~1,3-1,5 s nach Satzende ist der Boden für konsekutives Übersetzen mit heutigen APIs; davon ~0,4 s VAD, ~0,5 s Transkript, ~0,5 s bis zum ersten Ton.
 
+## Stand (10.11.) - Anrufer-Sprache nicht mehr von einem Wort kippen lassen
+- Testanruf (gpt-realtime-Pfad, ~0,9-1,4 s bis KI-Stimme, also Latenz ok): ein falsch verstandenes "Hallo" (`ハル。`) setzte die Anrufer-Sprache sofort auf Japanisch (`[LANG] caller speaks ja`), danach ging die ganze Rückrichtung auf Japanisch. Ursache: solange `callerLang` unbekannt war, wurde die erste Erkennung ohne Bestätigung übernommen.
+- Fix: `src/services/langLock.js` - nur Äusserungen mit genug Text zählen (>= 2 Wörter und >= 6 Buchstaben, bzw. >= 4 Zeichen bei CJK), Stimmen über die letzten 6 Erkennungen; erste Festlegung braucht 2 Stimmen (`LANG_FIRST_LOCK`), ein Wechsel 3 (`LANG_SWITCH_AFTER`) und muss die anderen schlagen. Bis dahin gilt `CALLER_LANG` (Standard en).
+- Mit dem Ablauf des echten Anrufs durchgespielt: bleibt/wird `en`, springt nie auf `ja`.
+- Weiterhin offen: beide Telefone im selben Raum erzeugen Echo und Fehlverstehen ("Reißschein", "Hansi Mi"). Zum Testen Telefone trennen.
+
 ## Stand (28.10., Teil 6) - Gemini Live Translate
 
 ### Dritter Pfad: `TRANSLATOR=gemini` (hat Vorrang vor `REALTIME`)
